@@ -1,6 +1,6 @@
 {
 	"name": "pages-ws-app",
-	"version": "0.1.2",
+	"version": "0.2.0",
 	"private": true,
 	"sideEffects": false,
 	"main": "server/index.js",
@@ -15,7 +15,7 @@
 	},
 	"devDependencies": {
 		"@cloudflare/workers-tsconfig": "workspace:*",
-		"miniflare": "workspace:*",
+		"miniflare": "3.20241106.2",
 		"wrangler": "workspace:*",
 		"ws": "^8.8.0"
 	},
