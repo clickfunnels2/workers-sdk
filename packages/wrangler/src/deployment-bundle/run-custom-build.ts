@@ -18,18 +18,14 @@ export async function runCustomBuild(
 	if (build.command) {
 		// TODO: add a deprecation message here?
 		logger.log("Running custom build:", build.command);
-		const { stdout } = await execaCommand(build.command, {
+		await execaCommand(build.command, {
 			shell: true,
 			// we keep these two as "inherit" so that
 			// logs are still visible.
-
-			// NOTE: Disable stdout due to this bun limitation: https://github.com/oven-sh/bun/issues/7068
-			// stdout: "inherit",
-
+			stdout: "inherit",
 			stderr: "inherit",
 			...(build.cwd && { cwd: build.cwd }),
 		});
-		logger.log(stdout);
 
 		assertEntryPointExists(
 			expectedEntryAbsolute,
