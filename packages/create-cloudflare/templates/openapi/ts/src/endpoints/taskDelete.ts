@@ -1,38 +1,39 @@
-import {
-	OpenAPIRoute,
-	OpenAPIRouteSchema,
-	Path,
-} from "@cloudflare/itty-router-openapi";
+import { Bool, OpenAPIRoute, Str } from "chanfana";
+import { z } from "zod";
 import { Task } from "../types";
 
 export class TaskDelete extends OpenAPIRoute {
-	static schema: OpenAPIRouteSchema = {
+	schema = {
 		tags: ["Tasks"],
 		summary: "Delete a Task",
-		parameters: {
-			taskSlug: Path(String, {
-				description: "Task slug",
+		request: {
+			params: z.object({
+				taskSlug: Str({ description: "Task slug" }),
 			}),
 		},
 		responses: {
 			"200": {
 				description: "Returns if the task was deleted successfully",
-				schema: {
-					success: Boolean,
-					result: {
-						task: Task,
+				content: {
+					"application/json": {
+						schema: z.object({
+							series: z.object({
+								success: Bool(),
+								result: z.object({
+									task: Task,
+								}),
+							}),
+						}),
 					},
 				},
 			},
 		},
 	};
 
-	async handle(
-		request: Request,
-		env: any,
-		context: any,
-		data: Record<string, any>
-	) {
+	async handle(c) {
+		// Get validated data
+		const data = await this.getValidatedData<typeof this.schema>();
+
 		// Retrieve the validated slug
 		const { taskSlug } = data.params;
 

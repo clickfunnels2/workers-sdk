@@ -1,33 +1,43 @@
-import {
-	OpenAPIRoute,
-	OpenAPIRouteSchema,
-} from "@cloudflare/itty-router-openapi";
+import { Bool, OpenAPIRoute } from "chanfana";
+import { z } from "zod";
 import { Task } from "../types";
 
 export class TaskCreate extends OpenAPIRoute {
-	static schema: OpenAPIRouteSchema = {
+	schema = {
 		tags: ["Tasks"],
 		summary: "Create a new Task",
-		requestBody: Task,
+		request: {
+			body: {
+				content: {
+					"application/json": {
+						schema: Task,
+					},
+				},
+			},
+		},
 		responses: {
 			"200": {
 				description: "Returns the created task",
-				schema: {
-					success: Boolean,
-					result: {
-						task: Task,
+				content: {
+					"application/json": {
+						schema: z.object({
+							series: z.object({
+								success: Bool(),
+								result: z.object({
+									task: Task,
+								}),
+							}),
+						}),
 					},
 				},
 			},
 		},
 	};
 
-	async handle(
-		request: Request,
-		env: any,
-		context: any,
-		data: Record<string, any>
-	) {
+	async handle(c) {
+		// Get validated data
+		const data = await this.getValidatedData<typeof this.schema>();
+
 		// Retrieve the validated request body
 		const taskToCreate = data.body;
 

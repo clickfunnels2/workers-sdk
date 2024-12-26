@@ -1,5 +1,5 @@
-import { Worker, TypedModule } from "./useDraftWorker";
 import lzstring from "lz-string";
+import type { TypedModule, Worker } from "./useDraftWorker";
 
 // Parse a serialised FormData representation of a (very!) simple worker
 // Importantly, this only supports a subset of worker config relevant to Playground workers
@@ -9,9 +9,11 @@ async function parseSerialisedPlaygroundWorker(
 ): Promise<Worker> {
 	const metadataPart = service.get("metadata");
 	let metadataJson: Record<string, string> = {};
-	if (metadataPart && metadataPart instanceof File) {
+	if (metadataPart) {
 		try {
-			metadataJson = JSON.parse(await metadataPart.text());
+			metadataJson = JSON.parse(
+				metadataPart instanceof File ? await metadataPart.text() : metadataPart
+			);
 		} catch {}
 	}
 
@@ -38,6 +40,7 @@ async function parseSerialisedPlaygroundWorker(
 							"application/javascript",
 							"application/javascript+module",
 							"text/plain",
+							"text/x-python",
 						].includes(file.type)
 				)
 				.map(async ([name, file]) => [

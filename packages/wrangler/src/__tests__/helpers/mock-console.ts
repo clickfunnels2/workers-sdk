@@ -1,16 +1,20 @@
 import * as util from "node:util";
+import * as streams from "@cloudflare/cli/streams";
+import { afterEach, beforeEach, vi } from "vitest";
 import { logger } from "../../logger";
+import { normalizeString } from "./normalize";
+import type { MockInstance } from "vitest";
 
 /**
  * We use this module to mock console methods, and optionally
  * assert on the values they're called with in our tests.
  */
 
-let debugSpy: jest.SpyInstance,
-	logSpy: jest.SpyInstance,
-	infoSpy: jest.SpyInstance,
-	errorSpy: jest.SpyInstance,
-	warnSpy: jest.SpyInstance;
+let debugSpy: MockInstance,
+	logSpy: MockInstance,
+	infoSpy: MockInstance,
+	errorSpy: MockInstance,
+	warnSpy: MockInstance;
 
 const std = {
 	get debug() {
@@ -30,30 +34,24 @@ const std = {
 	},
 };
 
-function normalizeOutput(spy: jest.SpyInstance): string {
-	return normalizeErrorMarkers(
-		replaceByte(
-			stripTrailingWhitespace(
-				normalizeSlashes(normalizeTempDirs(stripTimings(captureCalls(spy))))
-			)
-		)
-	);
+function normalizeOutput(spy: MockInstance, join = "\n"): string {
+	return normalizeString(captureCalls(spy, join));
 }
 
-function captureCalls(spy: jest.SpyInstance): string {
+function captureCalls(spy: MockInstance, join = "\n"): string {
 	return spy.mock.calls
 		.map((args: unknown[]) => util.format("%s", ...args))
-		.join("\n");
+		.join(join);
 }
 
 export function mockConsoleMethods() {
 	beforeEach(() => {
 		logger.columns = 100;
-		debugSpy = jest.spyOn(console, "debug").mockImplementation();
-		logSpy = jest.spyOn(console, "log").mockImplementation();
-		infoSpy = jest.spyOn(console, "info").mockImplementation();
-		errorSpy = jest.spyOn(console, "error").mockImplementation();
-		warnSpy = jest.spyOn(console, "warn").mockImplementation();
+		debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+		logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+		errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 	});
 	afterEach(() => {
 		debugSpy.mockRestore();
@@ -65,48 +63,30 @@ export function mockConsoleMethods() {
 	return std;
 }
 
-/**
- * Normalize error `X` markers.
- *
- * Windows gets a different character.
- */
-function normalizeErrorMarkers(str: string): string {
-	return str.replaceAll("✘", "X");
-}
+let outSpy: MockInstance, errSpy: MockInstance;
 
-/**
- * Ensure slashes in the `str` are OS file-system agnostic.
- *
- * Use this in snapshot tests to be resilient to file-system differences.
- */
-export function normalizeSlashes(str: string): string {
-	return str.replace(/\\/g, "/");
-}
+const process = {
+	get stdout() {
+		return normalizeOutput(outSpy, "");
+	},
 
-/**
- * Strip "timing data" out of the `stdout` string, since this is not always deterministic.
- *
- * Use this in snapshot tests to be resilient to slight changes in timing of processing.
- */
-export function stripTimings(stdout: string): string {
-	return stdout.replace(/\(\d+\.\d+ sec\)/g, "(TIMINGS)");
-}
+	get stderr() {
+		return normalizeOutput(errSpy, "");
+	},
+};
 
-export function stripTrailingWhitespace(str: string): string {
-	return str.replace(/[^\S\n]+\n/g, "\n");
-}
+export function mockCLIOutput() {
+	beforeEach(() => {
+		outSpy = vi.spyOn(streams.stdout, "write").mockImplementation(() => true);
+		errSpy = vi
+			.spyOn(streams.stderr, "write")
+			.mockImplementationOnce(() => true);
+	});
 
-/**
- * Removing leading kilobit (tenth of a byte) from test output due to
- * variation causing every few tests the value to change by ± .01
- */
-function replaceByte(stdout: string): string {
-	return stdout.replaceAll(/\d+\.\d+ KiB/g, "xx KiB");
-}
+	afterEach(() => {
+		outSpy.mockRestore();
+		errSpy.mockRestore();
+	});
 
-/**
- * Temp directories are created with random names, so we replace all comments temp dirs in them
- */
-export function normalizeTempDirs(stdout: string): string {
-	return stdout.replaceAll(/\/\/.+\/tmp.+/g, "//tmpdir");
+	return process;
 }

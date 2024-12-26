@@ -1,14 +1,14 @@
 import assert from "assert";
 import fs from "fs/promises";
 import path from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import test from "ava";
 import Protocol from "devtools-protocol";
 import esbuild from "esbuild";
-import { DeferredPromise, Miniflare } from "miniflare";
-import type { RawSourceMap } from "source-map";
+import { DeferredPromise, fetch, Log, LogLevel, Miniflare } from "miniflare";
 import NodeWebSocket from "ws";
-import { escapeRegexp, useTmp } from "../../../test-shared";
+import { escapeRegexpComponent, useTmp } from "../../../test-shared";
+import type { RawSourceMap } from "source-map";
 
 const FIXTURES_PATH = path.resolve(
 	__dirname,
@@ -25,6 +25,12 @@ const SERVICE_WORKER_ENTRY_PATH = path.join(FIXTURES_PATH, "service-worker.ts");
 const MODULES_ENTRY_PATH = path.join(FIXTURES_PATH, "modules.ts");
 const DEP_ENTRY_PATH = path.join(FIXTURES_PATH, "nested/dep.ts");
 const REDUCE_PATH = path.join(FIXTURES_PATH, "reduce.ts");
+
+function pathOrUrlRegexp(filePath: string): `(${string}|${string})` {
+	return `(${escapeRegexpComponent(filePath)}|${escapeRegexpComponent(
+		pathToFileURL(filePath).href
+	)})`;
+}
 
 test("source maps workers", async (t) => {
 	// Build fixtures
@@ -135,8 +141,8 @@ addEventListener("fetch", (event) => {
 	let error = await t.throwsAsync(mf.dispatchFetch("http://localhost"), {
 		message: "unnamed",
 	});
-	const serviceWorkerEntryRegexp = escapeRegexp(
-		`${SERVICE_WORKER_ENTRY_PATH}:6:16`
+	const serviceWorkerEntryRegexp = new RegExp(
+		`${pathOrUrlRegexp(SERVICE_WORKER_ENTRY_PATH)}:6:16`
 	);
 	t.regex(String(error?.stack), serviceWorkerEntryRegexp);
 	error = await t.throwsAsync(mf.dispatchFetch("http://localhost/a"), {
@@ -148,7 +154,9 @@ addEventListener("fetch", (event) => {
 	error = await t.throwsAsync(mf.dispatchFetch("http://localhost/b"), {
 		message: "b",
 	});
-	const modulesEntryRegexp = escapeRegexp(`${MODULES_ENTRY_PATH}:5:17`);
+	const modulesEntryRegexp = new RegExp(
+		`${pathOrUrlRegexp(MODULES_ENTRY_PATH)}:5:17`
+	);
 	t.regex(String(error?.stack), modulesEntryRegexp);
 	error = await t.throwsAsync(mf.dispatchFetch("http://localhost/c"), {
 		message: "c",
@@ -174,7 +182,7 @@ addEventListener("fetch", (event) => {
 		instanceOf: TypeError,
 		message: "Dependency error",
 	});
-	const nestedRegexp = escapeRegexp(`${DEP_ENTRY_PATH}:4:16`);
+	const nestedRegexp = new RegExp(`${pathOrUrlRegexp(DEP_ENTRY_PATH)}:4:16`);
 	t.regex(String(error?.stack), nestedRegexp);
 
 	// Check source mapping URLs rewritten
@@ -268,3 +276,70 @@ async function getSources(inspectorBaseURL: URL, serviceName: string) {
 		})
 		.sort();
 }
+
+// TODO(soon): just use `NoOpLog` when `Log#error()` no longer throws
+class SafeLog extends Log {
+	error(message: Error) {
+		this.logWithLevel(LogLevel.ERROR, String(message));
+	}
+}
+
+test("responds with pretty error page", async (t) => {
+	const mf = new Miniflare({
+		log: new SafeLog(LogLevel.NONE),
+		modules: true,
+		script: `
+		function reduceError(e) {
+			return {
+				name: e?.name,
+				message: e?.message ?? String(e),
+				stack: e?.stack,
+			};
+		}
+		export default {
+			async fetch() {
+				const error = reduceError(new Error("Unusual oops!"));
+				return Response.json(error, {
+					status: 500,
+					headers: { "MF-Experimental-Error-Stack": "true" },
+				});
+			}
+		}`,
+	});
+	t.teardown(() => mf.dispose());
+	const url = new URL("/some-unusual-path", await mf.ready);
+
+	// Check `fetch()` returns pretty-error page...
+	let res = await fetch(url, {
+		method: "POST",
+		headers: { "X-Unusual-Key": "some-unusual-value" },
+	});
+	t.is(res.status, 500);
+	t.regex(res.headers.get("Content-Type") ?? "", /^text\/html/);
+	const text = await res.text();
+	// ...including error, request method, URL and headers
+	t.regex(text, /Unusual oops!/);
+	t.regex(text, /Method.+POST/s);
+	t.regex(text, /URI.+some-unusual-path/s);
+	t.regex(text, /X-Unusual-Key.+some-unusual-value/is);
+
+	// Check `fetch()` accepting HTML returns pretty-error page
+	res = await fetch(url, { headers: { Accept: "text/html" } });
+	t.is(res.status, 500);
+	t.regex(res.headers.get("Content-Type") ?? "", /^text\/html/);
+
+	// Check `fetch()` accepting text doesn't return pretty-error page
+	res = await fetch(url, { headers: { Accept: "text/plain" } });
+	t.is(res.status, 500);
+	t.regex(res.headers.get("Content-Type") ?? "", /^text\/plain/);
+	t.regex(await res.text(), /Unusual oops!/);
+
+	// Check `fetch()` as `curl` doesn't return pretty-error page
+	res = await fetch(url, { headers: { "User-Agent": "curl/0.0.0" } });
+	t.is(res.status, 500);
+	t.regex(res.headers.get("Content-Type") ?? "", /^text\/plain/);
+	t.regex(await res.text(), /Unusual oops!/);
+
+	// Check `dispatchFetch()` propagates exception
+	await t.throwsAsync(mf.dispatchFetch(url), { message: "Unusual oops!" });
+});

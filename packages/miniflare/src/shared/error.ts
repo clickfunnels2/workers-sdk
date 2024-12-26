@@ -28,7 +28,10 @@ export type MiniflareCoreErrorCode =
 	| "ERR_NO_WORKERS" // No workers defined
 	| "ERR_VALIDATION" // Options failed to parse
 	| "ERR_DUPLICATE_NAME" // Multiple workers defined with same name
+	| "ERR_DIFFERENT_STORAGE_BACKEND" // Multiple Durable Object bindings declared for same class with different storage backends
 	| "ERR_DIFFERENT_UNIQUE_KEYS" // Multiple Durable Object bindings declared for same class with different unsafe unique keys
 	| "ERR_DIFFERENT_PREVENT_EVICTION" // Multiple Durable Object bindings declared for same class with different unsafe prevent eviction values
-	| "ERR_MULTIPLE_OUTBOUNDS"; // Both `outboundService` and `fetchMock` specified
+	| "ERR_MULTIPLE_OUTBOUNDS" // Both `outboundService` and `fetchMock` specified
+	| "ERR_INVALID_WRAPPED" // Worker not allowed to be used as wrapped binding
+	| "ERR_CYCLIC"; // Generate cyclic workerd config
 export class MiniflareCoreError extends MiniflareError<MiniflareCoreErrorCode> {}

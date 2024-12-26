@@ -1,19 +1,22 @@
 import assert from "node:assert";
+import { Buffer } from "node:buffer";
 import { parse } from "devalue";
 import { readPrefix, reduceError } from "miniflare:shared";
 import {
+	CoreBindings,
 	CoreHeaders,
-	ProxyAddresses,
-	ProxyOps,
 	isFetcherFetch,
 	isR2ObjectWriteHttpMetadata,
+	ProxyAddresses,
+	ProxyOps,
 } from "./constants";
 import {
-	PlatformImpl,
-	ReducersRevivers,
+	__MiniflareFunctionWrapper,
 	createHTTPReducers,
 	createHTTPRevivers,
 	parseWithReadableStreams,
+	PlatformImpl,
+	ReducersRevivers,
 	stringifyWithStreams,
 	structuredSerializableReducers,
 	structuredSerializableRevivers,
@@ -21,6 +24,7 @@ import {
 
 const ENCODER = new TextEncoder();
 const DECODER = new TextDecoder();
+const ALLOWED_HOSTNAMES = ["127.0.0.1", "[::1]", "localhost"];
 
 const WORKERS_PLATFORM_IMPL: PlatformImpl<ReadableStream> = {
 	Blob,
@@ -49,15 +53,61 @@ const objectProtoNames = Object.getOwnPropertyNames(Object.prototype)
 	.join("\0");
 function isPlainObject(value: unknown) {
 	const proto = Object.getPrototypeOf(value);
+	if (value?.constructor?.name === "RpcStub") {
+		return false;
+	}
+	if (isObject(value)) {
+		const valueAsRecord = value as Record<string, unknown>;
+		if (objectContainsFunctions(valueAsRecord)) {
+			return false;
+		}
+	}
 	return (
 		proto === Object.prototype ||
 		proto === null ||
 		Object.getOwnPropertyNames(proto).sort().join("\0") === objectProtoNames
 	);
 }
+function objectContainsFunctions(
+	obj: Record<string | symbol, unknown>
+): boolean {
+	const propertyNames = Object.getOwnPropertyNames(obj);
+	const propertySymbols = Object.getOwnPropertySymbols(obj);
+	const properties = [...propertyNames, ...propertySymbols];
+
+	for (const property of properties) {
+		const entry = obj[property];
+		if (typeof entry === "function") {
+			return true;
+		}
+		if (
+			isObject(entry) &&
+			objectContainsFunctions(entry as Record<string, unknown>)
+		) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+function isObject(
+	value: unknown
+): value is Record<string | number | symbol, unknown> {
+	return !!value && typeof value === "object";
+}
+
 function getType(value: unknown) {
 	return Object.prototype.toString.call(value).slice(8, -1); // `[object <type>]`
 }
+
+function isInternal(value: unknown) {
+	return isObject(value) && value[Symbol.for("cloudflare:internal-class")];
+}
+
+type Env = Record<string, unknown> & {
+	[CoreBindings.DATA_PROXY_SECRET]: ArrayBuffer;
+};
 
 // TODO(someday): extract `ProxyServer` into component that could be used by
 //  other (user) Durable Objects
@@ -75,11 +125,16 @@ export class ProxyServer implements DurableObject {
 			// should only ever return `Object`, as none override `Symbol.toStringTag`
 			// https://tc39.es/ecma262/multipage/fundamental-objects.html#sec-object.prototype.tostring
 			const type = getType(value);
-			if ((type === "Object" && !isPlainObject(value)) || type === "Promise") {
+			if (
+				((type === "Object" || isInternal(value)) && !isPlainObject(value)) ||
+				type === "Promise"
+			) {
 				const address = this.nextHeapAddress++;
 				this.heap.set(address, value);
-				assert(typeof value === "object" && value !== null);
-				return [address, value.constructor.name];
+				assert(value !== null);
+				const name = value?.constructor.name;
+				const isFunction = value instanceof __MiniflareFunctionWrapper;
+				return [address, name, isFunction];
 			}
 		},
 	};
@@ -105,7 +160,10 @@ export class ProxyServer implements DurableObject {
 	};
 	nativeReviver: ReducersRevivers = { Native: this.revivers.Native };
 
-	constructor(_state: DurableObjectState, env: Record<string, unknown>) {
+	constructor(
+		_state: DurableObjectState,
+		readonly env: Env
+	) {
 		this.heap.set(ProxyAddresses.GLOBAL, globalThis);
 		this.heap.set(ProxyAddresses.ENV, env);
 	}
@@ -123,6 +181,30 @@ export class ProxyServer implements DurableObject {
 	}
 
 	async #fetch(request: Request) {
+		// Validate `Host` header
+		const hostHeader = request.headers.get("Host");
+		if (hostHeader == null) return new Response(null, { status: 400 });
+		try {
+			const host = new URL(`http://${hostHeader}`);
+			if (!ALLOWED_HOSTNAMES.includes(host.hostname)) {
+				return new Response(null, { status: 401 });
+			}
+		} catch {
+			return new Response(null, { status: 400 });
+		}
+
+		// Validate secret header to prevent unauthorised access to proxy
+		const secretHex = request.headers.get(CoreHeaders.OP_SECRET);
+		if (secretHex == null) return new Response(null, { status: 401 });
+		const expectedSecret = this.env[CoreBindings.DATA_PROXY_SECRET];
+		const secretBuffer = Buffer.from(secretHex, "hex");
+		if (
+			secretBuffer.byteLength !== expectedSecret.byteLength ||
+			!crypto.subtle.timingSafeEqual(secretBuffer, expectedSecret)
+		) {
+			return new Response(null, { status: 401 });
+		}
+
 		const opHeader = request.headers.get(CoreHeaders.OP);
 		const targetHeader = request.headers.get(CoreHeaders.OP_TARGET);
 		const keyHeader = request.headers.get(CoreHeaders.OP_KEY);
@@ -156,6 +238,10 @@ export class ProxyServer implements DurableObject {
 		if (opHeader === ProxyOps.GET) {
 			// If no key header is specified, just return the target
 			result = keyHeader === null ? target : target[keyHeader];
+
+			// Immediately resolve all RpcProperties
+			if (result?.constructor.name === "RpcProperty") result = await result;
+
 			if (typeof result === "function") {
 				// Calling functions-which-return-functions not yet supported
 				return new Response(null, {
@@ -176,9 +262,7 @@ export class ProxyServer implements DurableObject {
 		} else if (opHeader === ProxyOps.GET_OWN_KEYS) {
 			result = Object.getOwnPropertyNames(target);
 		} else if (opHeader === ProxyOps.CALL) {
-			// We don't allow callable targets yet (could be useful to implement if
-			// we ever need to proxy functions that return functions)
-			if (keyHeader === null) return new Response(null, { status: 400 });
+			assert(keyHeader !== null);
 			const func = target[keyHeader];
 			assert(typeof func === "function");
 
@@ -188,6 +272,7 @@ export class ProxyServer implements DurableObject {
 				const url = new URL(originalUrl ?? request.url);
 				// Create a new request to allow header mutation and use original URL
 				request = new Request(url, request);
+				request.headers.delete(CoreHeaders.OP_SECRET);
 				request.headers.delete(CoreHeaders.OP);
 				request.headers.delete(CoreHeaders.OP_TARGET);
 				request.headers.delete(CoreHeaders.OP_KEY);
@@ -220,7 +305,13 @@ export class ProxyServer implements DurableObject {
 			}
 			assert(Array.isArray(args));
 			try {
-				result = func.apply(target, args);
+				if (["RpcProperty", "RpcStub"].includes(func.constructor.name)) {
+					// let's resolve RpcPromise instances right away (to support serialization)
+					result = await func(...args);
+				} else {
+					result = func.apply(target, args);
+				}
+
 				// See `isR2ObjectWriteHttpMetadata()` comment for why this special
 				if (isR2ObjectWriteHttpMetadata(targetName, keyHeader)) {
 					result = args[0];

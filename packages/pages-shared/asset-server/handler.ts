@@ -25,8 +25,15 @@ type BodyEncoding = "manual" | "automatic";
 // Before serving a 404, we check the cache to see if we've served this asset recently
 // and if so, serve it from the cache instead of responding with a 404.
 // This gives a bit of a grace period between deployments for any clients browsing the old deployment.
-export const ASSET_PRESERVATION_CACHE = "assetPreservationCache";
+// Only the content hash is actually stored in the body.
+export const ASSET_PRESERVATION_CACHE = "assetPreservationCacheV2";
 const CACHE_CONTROL_PRESERVATION = "public, s-maxage=604800"; // 1 week
+
+/** The preservation cache should be periodically
+ * written to so that the age / expiration is reset.
+ * Note: Up to 12 hours of jitter added to this value.
+ */
+export const CACHE_PRESERVATION_WRITE_FREQUENCY = 86_400; // 1 day
 
 export const CACHE_CONTROL_BROWSER = "public, max-age=0, must-revalidate"; // have the browser check in with the server to make sure its local cache is valid before using it
 export const REDIRECTS_VERSION = 1;
@@ -65,10 +72,39 @@ type FindAssetEntryForPath<AssetEntry> = (
 	path: string
 ) => Promise<null | AssetEntry>;
 
+function generateETagHeader(assetKey: string) {
+	// https://support.cloudflare.com/hc/en-us/articles/218505467-Using-ETag-Headers-with-Cloudflare
+	// We sometimes remove etags unless they are wrapped in quotes
+	const strongETag = `"${assetKey}"`;
+	const weakETag = `W/"${assetKey}"`;
+	return { strongETag, weakETag };
+}
+
+function checkIfNoneMatch(
+	request: Request,
+	strongETag: string,
+	weakETag: string
+) {
+	const ifNoneMatch = request.headers.get("if-none-match");
+
+	// We sometimes downgrade strong etags to a weak ones, so we need to check for both
+	return ifNoneMatch === weakETag || ifNoneMatch === strongETag;
+}
+
 type ServeAsset<AssetEntry> = (
 	assetEntry: AssetEntry,
 	options?: { preserve: boolean }
 ) => Promise<Response>;
+
+type CacheStatus = "hit" | "miss";
+type CacheResult<A extends string> = `${A}-${CacheStatus}`;
+export type HandlerMetrics = {
+	preservationCacheResult?:
+		| CacheResult<"checked">
+		| "not-modified"
+		| "disabled";
+	earlyHintsResult?: CacheResult<"used" | "notused"> | "disabled";
+};
 
 type FullHandlerContext<AssetEntry, ContentNegotiation, Asset> = {
 	request: Request;
@@ -76,6 +112,7 @@ type FullHandlerContext<AssetEntry, ContentNegotiation, Asset> = {
 	xServerEnvHeader?: string;
 	xDeploymentIdHeader?: boolean;
 	logError: (err: Error) => void;
+	setMetrics?: (metrics: HandlerMetrics) => void;
 	findAssetEntryForPath: FindAssetEntryForPath<AssetEntry>;
 	getAssetKey(assetEntry: AssetEntry, content: ContentNegotiation): string;
 	negotiateContent(
@@ -116,13 +153,14 @@ export async function generateHandler<
 	Asset extends { body: ReadableStream | null; contentType: string } = {
 		body: ReadableStream | null;
 		contentType: string;
-	}
+	},
 >({
 	request,
 	metadata,
 	xServerEnvHeader,
 	xDeploymentIdHeader,
 	logError,
+	setMetrics,
 	findAssetEntryForPath,
 	getAssetKey,
 	negotiateContent,
@@ -208,10 +246,11 @@ export async function generateHandler<
 					destination.origin === new URL(request.url).origin
 						? `${destination.pathname}${destination.search || search}${
 								destination.hash
-						  }`
-						: `${destination.href}${destination.search ? "" : search}${
-								destination.hash
-						  }`;
+							}`
+						: `${destination.href.slice(0, destination.href.length - (destination.search.length + destination.hash.length))}${
+								destination.search ? destination.search : search
+							}${destination.hash}`;
+
 				switch (status) {
 					case 301:
 						return new MovedPermanentlyResponse(location, undefined, {
@@ -302,6 +341,10 @@ export async function generateHandler<
 		}
 	}
 
+	function isNullBodyStatus(status: number): boolean {
+		return [101, 204, 205, 304].includes(status);
+	}
+
 	async function attachHeaders(response: Response) {
 		const existingHeaders = new Headers(response.headers);
 
@@ -319,79 +362,104 @@ export async function generateHandler<
 			...Object.fromEntries(extraHeaders.entries()),
 		});
 
-		if (earlyHintsCache) {
+		if (
+			earlyHintsCache &&
+			isHTMLContentType(response.headers.get("Content-Type"))
+		) {
 			const preEarlyHintsHeaders = new Headers(headers);
 
 			// "Early Hints cache entries are keyed by request URI and ignore query strings."
 			// https://developers.cloudflare.com/cache/about/early-hints/
 			const earlyHintsCacheKey = `${protocol}//${host}${pathname}`;
-			const earlyHintsResponse = await earlyHintsCache.match(
-				earlyHintsCacheKey
-			);
+			const earlyHintsResponse =
+				await earlyHintsCache.match(earlyHintsCacheKey);
 			if (earlyHintsResponse) {
 				const earlyHintsLinkHeader = earlyHintsResponse.headers.get("Link");
 				if (earlyHintsLinkHeader) {
 					headers.set("Link", earlyHintsLinkHeader);
+					if (setMetrics) {
+						setMetrics({ earlyHintsResult: "used-hit" });
+					}
+				} else {
+					if (setMetrics) {
+						setMetrics({ earlyHintsResult: "notused-hit" });
+					}
+				}
+			} else {
+				if (setMetrics) {
+					setMetrics({ earlyHintsResult: "notused-miss" });
+				}
+
+				const clonedResponse = response.clone();
+
+				if (waitUntil) {
+					waitUntil(
+						(async () => {
+							try {
+								const links: { href: string; rel: string; as?: string }[] = [];
+
+								const transformedResponse = new HTMLRewriter()
+									.on(
+										"link[rel~=preconnect],link[rel~=preload],link[rel~=modulepreload]",
+										{
+											element(element) {
+												for (const [attributeName] of element.attributes) {
+													if (
+														!ALLOWED_EARLY_HINT_LINK_ATTRIBUTES.includes(
+															attributeName.toLowerCase()
+														)
+													) {
+														return;
+													}
+												}
+
+												const href = element.getAttribute("href") || undefined;
+												const rel = element.getAttribute("rel") || undefined;
+												const as = element.getAttribute("as") || undefined;
+												if (href && !href.startsWith("data:") && rel) {
+													links.push({ href, rel, as });
+												}
+											},
+										}
+									)
+									.transform(clonedResponse);
+
+								// Needed to actually execute the HTMLRewriter handlers
+								await transformedResponse.text();
+
+								links.forEach(({ href, rel, as }) => {
+									let link = `<${href}>; rel="${rel}"`;
+									if (as) {
+										link += `; as=${as}`;
+									}
+									preEarlyHintsHeaders.append("Link", link);
+								});
+
+								const linkHeader = preEarlyHintsHeaders.get("Link");
+								if (linkHeader) {
+									await earlyHintsCache.put(
+										earlyHintsCacheKey,
+										new Response(null, {
+											headers: {
+												Link: linkHeader,
+												"Cache-Control": "max-age=2592000", // 30 days
+											},
+										})
+									);
+								}
+							} catch (err) {
+								// Nbd if we fail here in the deferred 'waitUntil' work. We're probably trying to parse a malformed page or something.
+								// Totally fine to skip over any errors.
+								// If we need to debug something, you can uncomment the following:
+								// logError(err)
+							}
+						})()
+					);
 				}
 			}
-
-			const clonedResponse = response.clone();
-
-			if (waitUntil) {
-				waitUntil(
-					(async () => {
-						try {
-							const links: { href: string; rel: string; as?: string }[] = [];
-
-							const transformedResponse = new HTMLRewriter()
-								.on("link[rel~=preconnect],link[rel~=preload]", {
-									element(element) {
-										for (const [attributeName] of element.attributes) {
-											if (
-												!ALLOWED_EARLY_HINT_LINK_ATTRIBUTES.includes(
-													attributeName.toLowerCase()
-												)
-											) {
-												return;
-											}
-										}
-
-										const href = element.getAttribute("href") || undefined;
-										const rel = element.getAttribute("rel") || undefined;
-										const as = element.getAttribute("as") || undefined;
-										if (href && !href.startsWith("data:") && rel) {
-											links.push({ href, rel, as });
-										}
-									},
-								})
-								.transform(clonedResponse);
-
-							// Needed to actually execute the HTMLRewriter handlers
-							await transformedResponse.text();
-
-							links.forEach(({ href, rel, as }) => {
-								let link = `<${href}>; rel="${rel}"`;
-								if (as) {
-									link += `; as=${as}`;
-								}
-								preEarlyHintsHeaders.append("Link", link);
-							});
-
-							const linkHeader = preEarlyHintsHeaders.get("Link");
-							if (linkHeader) {
-								await earlyHintsCache.put(
-									earlyHintsCacheKey,
-									new Response(null, { headers: { Link: linkHeader } })
-								);
-							}
-						} catch (err) {
-							// Nbd if we fail here in the deferred 'waitUntil' work. We're probably trying to parse a malformed page or something.
-							// Totally fine to skip over any errors.
-							// If we need to debug something, you can uncomment the following:
-							// logError(err)
-						}
-					})()
-				);
+		} else {
+			if (setMetrics) {
+				setMetrics({ earlyHintsResult: "disabled" });
 			}
 		}
 
@@ -432,7 +500,7 @@ export async function generateHandler<
 
 		// https://fetch.spec.whatwg.org/#null-body-status
 		return new Response(
-			[101, 204, 205, 304].includes(response.status) ? null : response.body,
+			isNullBodyStatus(response.status) ? null : response.body,
 			{
 				headers: headers,
 				status: response.status,
@@ -441,7 +509,23 @@ export async function generateHandler<
 		);
 	}
 
-	return await attachHeaders(await generateResponse());
+	const responseWithoutHeaders = await generateResponse();
+	if (responseWithoutHeaders.status >= 500) {
+		return responseWithoutHeaders;
+	}
+
+	const responseWithHeaders = await attachHeaders(responseWithoutHeaders);
+	if (responseWithHeaders.status === 404) {
+		// Remove any user-controlled cache-control headers
+		// This is to prevent the footgun of potentionally caching this 404 for a long time
+		if (responseWithHeaders.headers.has("cache-control")) {
+			responseWithHeaders.headers.delete("cache-control");
+		}
+		// Add cache-control: no-store to prevent this from being cached on the responding zones.
+		responseWithHeaders.headers.append("cache-control", "no-store");
+	}
+
+	return responseWithHeaders;
 
 	async function serveAsset(
 		servingAssetEntry: AssetEntry,
@@ -456,22 +540,16 @@ export async function generateHandler<
 
 		const assetKey = getAssetKey(servingAssetEntry, content);
 
-		// https://support.cloudflare.com/hc/en-us/articles/218505467-Using-ETag-Headers-with-Cloudflare
-		// We sometimes remove etags unless they are wrapped in quotes
-		const etag = `"${assetKey}"`;
-		const weakEtag = `W/${etag}`;
-
-		const ifNoneMatch = request.headers.get("if-none-match");
-
-		// We sometimes downgrade strong etags to a weak ones, so we need to check for both
-		if (ifNoneMatch === weakEtag || ifNoneMatch === etag) {
+		const { strongETag, weakETag } = generateETagHeader(assetKey);
+		const isIfNoneMatch = checkIfNoneMatch(request, strongETag, weakETag);
+		if (isIfNoneMatch) {
 			return new NotModifiedResponse();
 		}
 
 		try {
 			const asset = await fetchAsset(assetKey);
 			const headers: Record<string, string> = {
-				etag,
+				etag: strongETag,
 				"content-type": asset.contentType,
 			};
 			let encodeBody: BodyEncoding = "automatic";
@@ -508,36 +586,47 @@ export async function generateHandler<
 				response.headers.set("x-robots-tag", "noindex");
 			}
 
-			if (options.preserve) {
-				// https://fetch.spec.whatwg.org/#null-body-status
-				const preservedResponse = new Response(
-					[101, 204, 205, 304].includes(response.status)
-						? null
-						: response.clone().body,
-					response
-				);
-				preservedResponse.headers.set(
-					"cache-control",
-					CACHE_CONTROL_PRESERVATION
-				);
-				preservedResponse.headers.set("x-robots-tag", "noindex");
+			if (options.preserve && waitUntil && caches) {
+				waitUntil(
+					(async () => {
+						try {
+							const assetPreservationCache = await caches.open(
+								ASSET_PRESERVATION_CACHE
+							);
 
-				if (waitUntil && caches) {
-					waitUntil(
-						caches
-							.open(ASSET_PRESERVATION_CACHE)
-							.then((assetPreservationCache) =>
-								assetPreservationCache.put(request.url, preservedResponse)
-							)
-							.catch((err) => {
-								logError(err);
-							})
-					);
-				}
+							// Check if the asset has changed since last written to cache
+							// or if the cached entry is getting too old and should have
+							// it's expiration reset.
+							const match = await assetPreservationCache.match(request);
+							if (
+								!match ||
+								assetKey !== (await match.text()) ||
+								isPreservationCacheResponseExpiring(match)
+							) {
+								// cache the asset key in the cache with all the headers.
+								// When we read it back, we'll re-fetch the body but use the
+								// cached headers.
+								const preservedResponse = new Response(assetKey, response);
+								preservedResponse.headers.set(
+									"cache-control",
+									CACHE_CONTROL_PRESERVATION
+								);
+								preservedResponse.headers.set("x-robots-tag", "noindex");
+
+								await assetPreservationCache.put(
+									request.url,
+									preservedResponse
+								);
+							}
+						} catch (err) {
+							logError(err as Error);
+						}
+					})()
+				);
 			}
 
 			if (
-				asset.contentType.startsWith("text/html") &&
+				isHTMLContentType(asset.contentType) &&
 				metadata.analytics?.version === ANALYTICS_VERSION
 			) {
 				return new HTMLRewriter()
@@ -561,12 +650,67 @@ export async function generateHandler<
 
 	async function notFound(): Promise<Response> {
 		if (caches) {
-			const assetPreservationCache = await caches.open(
-				ASSET_PRESERVATION_CACHE
-			);
-			const preservedResponse = await assetPreservationCache.match(request.url);
-			if (preservedResponse) {
-				return preservedResponse;
+			try {
+				const assetPreservationCache = await caches.open(
+					ASSET_PRESERVATION_CACHE
+				);
+				const preservedResponse = await assetPreservationCache.match(
+					request.url
+				);
+
+				// V2 cache only contains the asset key, rather than the asset body:
+				if (preservedResponse) {
+					if (setMetrics) {
+						setMetrics({ preservationCacheResult: "checked-hit" });
+					}
+					// Always read the asset key to prevent hanging responses
+					const assetKey = await preservedResponse.text();
+					if (isNullBodyStatus(preservedResponse.status)) {
+						// We know the asset hasn't changed, so use the cached headers.
+						return new Response(null, preservedResponse);
+					}
+					if (assetKey) {
+						const { strongETag, weakETag } = generateETagHeader(assetKey);
+						const isIfNoneMatch = checkIfNoneMatch(
+							request,
+							strongETag,
+							weakETag
+						);
+						if (isIfNoneMatch) {
+							if (setMetrics) {
+								setMetrics({ preservationCacheResult: "not-modified" });
+							}
+							return new NotModifiedResponse();
+						}
+
+						const asset = await fetchAsset(assetKey);
+
+						if (asset) {
+							// We know the asset hasn't changed, so use the cached headers.
+							return new Response(asset.body, preservedResponse);
+						} else {
+							logError(
+								new Error(
+									`preservation cache contained assetKey that does not exist in storage: ${assetKey}`
+								)
+							);
+						}
+					} else {
+						logError(new Error(`cached response had no assetKey: ${assetKey}`));
+					}
+				} else {
+					if (setMetrics) {
+						setMetrics({ preservationCacheResult: "checked-miss" });
+					}
+				}
+			} catch (err) {
+				// Don't throw an error because preservation cache is best effort.
+				// But log it because we should be able to fetch the asset here.
+				logError(err as Error);
+			}
+		} else {
+			if (setMetrics) {
+				setMetrics({ preservationCacheResult: "disabled" });
 			}
 		}
 
@@ -631,4 +775,36 @@ function isPreview(url: URL): boolean {
 		return url.hostname.split(".").length > 3 ? true : false;
 	}
 	return false;
+}
+
+/** Checks if a response is older than CACHE_PRESERVATION_WRITE_FREQUENCY
+ * and should be written to cache again to reset it's expiration.
+ */
+export function isPreservationCacheResponseExpiring(
+	response: Response
+): boolean {
+	const ageHeader = response.headers.get("age");
+	if (!ageHeader) {
+		return false;
+	}
+	try {
+		const age = parseInt(ageHeader);
+		// Add up to 12 hours of jitter to help prevent a
+		// thundering heard when a lot of assets expire at once.
+		const jitter = Math.floor(Math.random() * 43_200);
+		if (age > CACHE_PRESERVATION_WRITE_FREQUENCY + jitter) {
+			return true;
+		}
+	} catch {
+		return false;
+	}
+	return false;
+}
+
+/**
+ * Whether or not the passed in string looks like an HTML
+ * Content-Type header
+ */
+function isHTMLContentType(contentType?: string | null) {
+	return contentType?.toLowerCase().startsWith("text/html") || false;
 }

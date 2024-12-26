@@ -1,8 +1,9 @@
-import React, { useState } from "react";
-import { createComponent } from "@cloudflare/style-container";
-import { Div } from "@cloudflare/elements";
 import { Button } from "@cloudflare/component-button";
+import { Div } from "@cloudflare/elements";
+import { createComponent } from "@cloudflare/style-container";
+import { useEffect, useState } from "react";
 import { InputField } from "../InputField";
+import type React from "react";
 
 const StyledForm = createComponent(
 	({ theme }) => ({
@@ -15,43 +16,42 @@ const StyledForm = createComponent(
 );
 
 type Props = {
+	initialURL: string;
 	onSubmit: (url: string) => void;
 	loading: boolean;
 };
 
-export default function URLBar(props: Props) {
-	const [value, setValue] = useState("/");
+export default function URLBar({ initialURL, onSubmit, loading }: Props) {
+	const [url, setUrl] = useState(initialURL);
 
-	const onChangeInputValue = (e: React.ChangeEvent<HTMLInputElement>) => {
-		const { value: newValue } = e.target;
-		if (!newValue.startsWith("/")) {
-			setValue(`/${newValue}`);
-		} else {
-			setValue(newValue);
-		}
-	};
+	useEffect(() => {
+		setUrl(initialURL);
+	}, [initialURL]);
 
 	return (
 		<StyledForm
 			onSubmit={(e: React.FormEvent) => {
 				e.preventDefault();
-				props.onSubmit(value);
+				onSubmit(url);
 			}}
 		>
 			<Div display="flex" gap={2} width="100%">
 				<InputField
 					name="url"
 					autoComplete="off"
-					value={value}
-					onChange={onChangeInputValue}
+					value={url}
+					onChange={(event) => {
+						let newURL = event.target.value;
+
+						if (!newURL.startsWith("/")) {
+							newURL = `/${newURL}`;
+						}
+
+						setUrl(newURL);
+					}}
 				/>
-				<Button
-					type="primary"
-					inverted={true}
-					submit={true}
-					loading={props.loading}
-				>
-					Send
+				<Button type="primary" inverted={true} submit={true} loading={loading}>
+					Go
 				</Button>
 			</Div>
 		</StyledForm>

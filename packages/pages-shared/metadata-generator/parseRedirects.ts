@@ -1,12 +1,12 @@
 import {
-	MAX_LINE_LENGTH,
 	MAX_DYNAMIC_REDIRECT_RULES,
+	MAX_LINE_LENGTH,
 	MAX_STATIC_REDIRECT_RULES,
 	PERMITTED_STATUS_CODES,
-	SPLAT_REGEX,
 	PLACEHOLDER_REGEX,
+	SPLAT_REGEX,
 } from "./constants";
-import { validateUrl, urlHasHost } from "./validateURL";
+import { urlHasHost, validateUrl } from "./validateURL";
 import type {
 	InvalidRedirectRule,
 	ParsedRedirects,
@@ -26,7 +26,9 @@ export function parseRedirects(input: string): ParsedRedirects {
 
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i].trim();
-		if (line.length === 0 || line.startsWith("#")) continue;
+		if (line.length === 0 || line.startsWith("#")) {
+			continue;
+		}
 
 		if (line.length > MAX_LINE_LENGTH) {
 			invalid.push({
@@ -110,7 +112,7 @@ export function parseRedirects(input: string): ParsedRedirects {
 		}
 
 		// We want to always block the `/* /index.html` redirect - this will cause TOO_MANY_REDIRECTS errors as
-		// the asset server will redirect it back to `/`, removing the `/index.html`. This is the case for regular
+		// the asset worker will redirect it back to `/`, removing the `/index.html`. This is the case for regular
 		// redirects, as well as proxied (200) rewrites. We only want to run this on relative urls
 		if (/\/\*?$/.test(from) && /\/index(.html)?$/.test(to) && !urlHasHost(to)) {
 			invalid.push({

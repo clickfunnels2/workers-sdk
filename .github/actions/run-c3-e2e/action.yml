@@ -1,11 +1,17 @@
 name: "Run C3 E2E Tests"
 description: "Runs the C3 E2E tests on npm, pnpm, and bun"
 inputs:
-  package-manager:
+  packageManager:
     description: "Which package manager to run the tests with"
+    required: true
+  packageManagerVersion:
+    description: "Which package manager version to run the tests with"
     required: true
   quarantine:
     description: "Whether to run the tests in quarantine mode"
+    required: false
+  experimental:
+    description: "Whether to run the tests in experimental mode"
     required: false
   framework:
     description: "When specified, will only run tests for this framework"
@@ -20,10 +26,11 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Install Bun ${{ env.bun-version }}
+    - if: ${{ inputs.packageManager == 'bun' }}
+      name: Install Bun ${{ inputs.packageManagerVersion }}
       uses: oven-sh/setup-bun@v1
       with:
-        bun-version: ${{ env.bun-version }}
+        bun-version: ${{ inputs.packageManagerVersion }}
 
     # Needed because gatsby requires git
     - name: Configure Git
@@ -32,22 +39,27 @@ runs:
         git config --global user.email wrangler@cloudflare.com
         git config --global user.name 'Wrangler automated PR updater'
 
-    - name: E2E Tests
+    - name: E2E Tests ${{inputs.experimental && '(experimental)' || ''}}
       id: run-e2e
       shell: bash
-      continue-on-error: true
-      run: pnpm run --filter create-cloudflare test:e2e:${{ inputs.package-manager }}
+      run: pnpm run test:e2e --filter create-cloudflare
       env:
         CLOUDFLARE_API_TOKEN: ${{ inputs.apiToken }}
         CLOUDFLARE_ACCOUNT_ID: ${{ inputs.accountId }}
         E2E_QUARANTINE: ${{ inputs.quarantine }}
+        E2E_EXPERIMENTAL: ${{ inputs.experimental }}
         FRAMEWORK_CLI_TO_TEST: ${{ inputs.framework }}
+        TEST_PM: ${{ inputs.packageManager }}
+        TEST_PM_VERSION: ${{ inputs.packageManagerVersion }}
+        CI_OS: ${{ runner.os }}
 
     - name: Upload Logs
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
+      if: always()
       with:
-        name: e2e-logs
-        path: packages/create-cloudflare/.e2e-logs
+        name: e2e-logs${{inputs.quarantine && '-quarantine' || ''}}${{inputs.experimental && '-experimental' || ''}}-${{runner.os}}-${{inputs.packageManager}}
+        path: packages/create-cloudflare/.e2e-logs${{inputs.experimental && '-experimental' || ''}}
+        include-hidden-files: true
 
     - name: Fail if errors detected
       shell: bash

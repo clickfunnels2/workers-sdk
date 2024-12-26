@@ -1,12 +1,14 @@
-import { useContext, useMemo } from "react";
-import { Div } from "@cloudflare/elements";
-import { useInjectSources } from "./useInjectSources";
-import UrlBar from "./UrlBar";
-import { ServiceContext } from "../QuickEditor";
-import FrameErrorBoundary, { FrameError } from "../FrameErrorBoundary";
-import { useRefreshableIframe } from "./useRefreshableIframe";
-import { theme } from "@cloudflare/style-const";
 import { Loading } from "@cloudflare/component-loading";
+import { Div } from "@cloudflare/elements";
+import { theme } from "@cloudflare/style-const";
+import {
+	useInjectSources,
+	useRefreshableIframe,
+} from "@cloudflare/workers-editor-shared";
+import { useContext, useMemo } from "react";
+import FrameErrorBoundary, { FrameError } from "../FrameErrorBoundary";
+import { ServiceContext } from "../QuickEditor";
+import UrlBar from "./UrlBar";
 
 export function getPreviewIframeUrl(edgePreview: string, previewUrl: string) {
 	const url = new URL(edgePreview);
@@ -14,7 +16,7 @@ export function getPreviewIframeUrl(edgePreview: string, previewUrl: string) {
 	return url.href;
 }
 
-function PreviewTab() {
+function PreviewTabImplementation() {
 	const draftWorker = useContext(ServiceContext);
 
 	const previewSrc = useMemo(() => {
@@ -39,14 +41,17 @@ function PreviewTab() {
 	return (
 		<Div display="flex" flexDirection="column" width="100%">
 			<UrlBar
+				initialURL={draftWorker.previewUrl}
 				onSubmit={(url) => {
+					draftWorker.preview();
+
 					if (url === draftWorker?.previewUrl) {
 						refresh();
 					} else {
 						draftWorker.setPreviewUrl(url);
 					}
 				}}
-				loading={isLoading}
+				loading={isLoading || draftWorker.isPreviewUpdating}
 			/>
 			{!firstLoad && !draftWorker?.previewError && (
 				<Div
@@ -89,8 +94,10 @@ function PreviewTab() {
 	);
 }
 
-export default () => (
-	<FrameErrorBoundary fallback={"Invalid URL"}>
-		<PreviewTab />
-	</FrameErrorBoundary>
-);
+export default function PreviewTab() {
+	return (
+		<FrameErrorBoundary fallback={"Invalid URL"}>
+			<PreviewTabImplementation />
+		</FrameErrorBoundary>
+	);
+}

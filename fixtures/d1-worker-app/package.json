@@ -1,6 +1,5 @@
 {
 	"name": "d1-worker-app",
-	"version": "1.0.0",
 	"private": true,
 	"description": "",
 	"license": "ISC",
@@ -14,5 +13,8 @@
 	},
 	"devDependencies": {
 		"wrangler": "workspace:*"
+	},
+	"volta": {
+		"extends": "../../package.json"
 	}
 }

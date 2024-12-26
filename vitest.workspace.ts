@@ -1,1 +1,5 @@
-export default ["packages/*/vitest.config.ts", "fixtures/*/vitest.config.ts"];
+export default [
+	"packages/*/vitest.config.mts",
+	"fixtures/*/vitest.config.mts",
+	"tools/vitest.config.mts",
+];

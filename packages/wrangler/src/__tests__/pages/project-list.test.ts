@@ -1,4 +1,4 @@
-import { rest } from "msw";
+import { http, HttpResponse } from "msw";
 import { endEventLoop } from "../helpers/end-event-loop";
 import { mockConsoleMethods } from "../helpers/mock-console";
 import { mockAccountId, mockApiToken } from "./../helpers/mock-account-id";
@@ -7,7 +7,7 @@ import { runInTempDir } from "./../helpers/run-in-tmp";
 import { runWrangler } from "./../helpers/run-wrangler";
 import type { Project } from "./../../pages/types";
 
-describe("project list", () => {
+describe("pages project list", () => {
 	runInTempDir();
 	mockConsoleMethods();
 	mockAccountId();
@@ -75,36 +75,57 @@ describe("project list", () => {
 		await runWrangler("pages project list");
 		expect(requests.count).toEqual(2);
 	});
+
+	it("should override cached accountId with CLOUDFLARE_ACCOUNT_ID environmental variable if provided", async () => {
+		vi.mock("getConfigCache", () => {
+			return {
+				account_id: "original-account-id",
+				project_name: "an-existing-project",
+			};
+		});
+		vi.stubEnv("CLOUDFLARE_ACCOUNT_ID", "new-account-id");
+		const requests = mockProjectListRequest([], "new-account-id");
+		await runWrangler("pages project list");
+		expect(requests.count).toBe(1);
+	});
 });
 
 /* -------------------------------------------------- */
 /*                    Helper Functions                */
 /* -------------------------------------------------- */
 
-function mockProjectListRequest(projects: unknown[]) {
+function mockProjectListRequest(
+	projects: unknown[],
+	accountId = "some-account-id"
+) {
 	const requests = { count: 0 };
 	msw.use(
-		rest.get("*/accounts/:accountId/pages/projects", async (req, res, ctx) => {
-			requests.count++;
-			const pageSize = Number(req.url.searchParams.get("per_page"));
-			const page = Number(req.url.searchParams.get("page"));
-			const expectedPageSize = 10;
-			const expectedPage = requests.count;
-			expect(req.params.accountId).toEqual("some-account-id");
-			expect(pageSize).toEqual(expectedPageSize);
-			expect(page).toEqual(expectedPage);
-			expect(await req.text()).toEqual("");
+		http.get(
+			"*/accounts/:accountId/pages/projects",
+			async ({ request, params }) => {
+				const url = new URL(request.url);
 
-			return res(
-				ctx.status(200),
-				ctx.json({
-					success: true,
-					errors: [],
-					messages: [],
-					result: projects.slice((page - 1) * pageSize, page * pageSize),
-				})
-			);
-		})
+				requests.count++;
+				const pageSize = Number(url.searchParams.get("per_page"));
+				const page = Number(url.searchParams.get("page"));
+				const expectedPageSize = 10;
+				const expectedPage = requests.count;
+				expect(params.accountId).toEqual(accountId);
+				expect(pageSize).toEqual(expectedPageSize);
+				expect(page).toEqual(expectedPage);
+				expect(await request.text()).toEqual("");
+
+				return HttpResponse.json(
+					{
+						success: true,
+						errors: [],
+						messages: [],
+						result: projects.slice((page - 1) * pageSize, page * pageSize),
+					},
+					{ status: 200 }
+				);
+			}
+		)
 	);
 	return requests;
 }

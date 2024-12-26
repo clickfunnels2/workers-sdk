@@ -1,8 +1,8 @@
 import assert from "assert";
-import path from "path";
 import { fetchResult } from "./cfetch";
-import { findWranglerToml, readConfig } from "./config";
+import { configFileName, readConfig } from "./config";
 import { confirm } from "./dialogs";
+import { UserError } from "./errors";
 import { deleteKVNamespace, listKVNamespaces } from "./kv/helpers";
 import { logger } from "./logger";
 import * as metrics from "./metrics";
@@ -93,10 +93,14 @@ type DeleteArgs = StrictYargsOptionsToInterface<typeof deleteOptions>;
 export async function deleteHandler(args: DeleteArgs) {
 	await printWranglerBanner();
 
-	const configPath =
-		args.config || (args.script && findWranglerToml(path.dirname(args.script)));
-	const config = readConfig(configPath, args);
-	await metrics.sendMetricsEvent(
+	const config = readConfig(args);
+	if (config.pages_build_output_dir) {
+		throw new UserError(
+			"It looks like you've run a Workers-specific command in a Pages project.\n" +
+				"For Pages, please run `wrangler pages project delete` instead."
+		);
+	}
+	metrics.sendMetricsEvent(
 		"delete worker script",
 		{},
 		{ sendMetrics: config.send_metrics }
@@ -105,11 +109,11 @@ export async function deleteHandler(args: DeleteArgs) {
 	const accountId = args.dryRun ? undefined : await requireAuth(config);
 
 	const scriptName = getScriptName(args, config);
-
-	assert(
-		scriptName,
-		"A worker name must be defined, either via --name, or in wrangler.toml"
-	);
+	if (!scriptName) {
+		throw new UserError(
+			`A worker name must be defined, either via --name, or in your ${configFileName(config.configPath)} file`
+		);
+	}
 
 	if (args.dryRun) {
 		logger.log(`--dry-run: exiting now.`);
@@ -219,7 +223,9 @@ async function checkAndConfirmForceDeleteIfNecessary(
 		isUsedAsDurableObjectNamespace(references, scriptName) ||
 		isUsedAsDispatchOutbound(references) ||
 		isUsedAsTailConsumer(tailProducers);
-	if (!isDependentService) return false;
+	if (!isDependentService) {
+		return false;
+	}
 
 	const dependentMessages: string[] = [];
 	for (const serviceBindingReference of references.services?.incoming || []) {
@@ -230,7 +236,9 @@ async function checkAndConfirmForceDeleteIfNecessary(
 	}
 	for (const implementedDOBindingReference of references.durable_objects ||
 		[]) {
-		if (implementedDOBindingReference.service === scriptName) continue;
+		if (implementedDOBindingReference.service === scriptName) {
+			continue;
+		}
 		const dependentScript = renderScriptName(implementedDOBindingReference);
 		dependentMessages.push(
 			`- Worker ${dependentScript} has a binding to the Durable Object Namespace "${implementedDOBindingReference.durable_object_namespace_name}" implemented by this Worker`

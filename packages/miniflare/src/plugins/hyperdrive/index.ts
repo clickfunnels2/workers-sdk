@@ -1,24 +1,31 @@
+import assert from "node:assert";
 import { z } from "zod";
 import { Service, Worker_Binding } from "../../runtime";
-import { Plugin } from "../shared";
+import { Plugin, ProxyNodeBinding } from "../shared";
 
 export const HYPERDRIVE_PLUGIN_NAME = "hyperdrive";
 
+function hasPostgresProtocol(url: URL) {
+	return url.protocol === "postgresql:" || url.protocol === "postgres:";
+}
+
+function getPort(url: URL) {
+	if (url.port !== "") return url.port;
+	if (hasPostgresProtocol(url)) return "5432";
+	// Validated in `HyperdriveSchema`
+	assert.fail(`Expected known protocol, got ${url.protocol}`);
+}
+
 export const HyperdriveSchema = z
-	.string()
-	.url()
-	.transform((urlString, ctx) => {
-		const url = new URL(urlString);
+	.union([z.string().url(), z.instanceof(URL)])
+	.transform((url, ctx) => {
+		if (typeof url === "string") url = new URL(url);
 		if (url.protocol === "") {
 			ctx.addIssue({
 				code: z.ZodIssueCode.custom,
 				message: "You must specify the database protocol - e.g. 'postgresql'.",
 			});
-		} else if (
-			url.protocol !== "postgresql:" &&
-			url.protocol !== "postgres:" &&
-			url.protocol !== ""
-		) {
+		} else if (!hasPostgresProtocol(url)) {
 			ctx.addIssue({
 				code: z.ZodIssueCode.custom,
 				message:
@@ -30,21 +37,6 @@ export const HyperdriveSchema = z
 				code: z.ZodIssueCode.custom,
 				message:
 					"You must provide a hostname or IP address in your connection string - e.g. 'user:password@database-hostname.example.com:5432/databasename",
-			});
-		}
-		let port: string | undefined;
-		if (
-			url.port === "" &&
-			(url.protocol === "postgresql:" || url.protocol == "postgres:")
-		) {
-			port = "5432";
-		} else if (url.port !== "") {
-			port = url.port;
-		} else {
-			ctx.addIssue({
-				code: z.ZodIssueCode.custom,
-				message:
-					"You must provide a port number - e.g. 'user:password@database.example.com:port/databasename",
 			});
 		}
 		if (url.pathname === "") {
@@ -68,14 +60,8 @@ export const HyperdriveSchema = z
 					"You must provide a password - e.g. 'user:password@database.example.com:port/databasename' ",
 			});
 		}
-		return {
-			database: url.pathname.replace("/", ""),
-			user: url.username,
-			password: url.password,
-			scheme: url.protocol.replace(":", ""),
-			host: url.hostname,
-			port: port,
-		};
+
+		return url;
 	});
 
 export const HyperdriveInputOptionsSchema = z.object({
@@ -86,29 +72,49 @@ export const HYPERDRIVE_PLUGIN: Plugin<typeof HyperdriveInputOptionsSchema> = {
 	options: HyperdriveInputOptionsSchema,
 	getBindings(options) {
 		return Object.entries(options.hyperdrives ?? {}).map<Worker_Binding>(
-			([name, config]) => ({
-				name,
-				hyperdrive: {
-					designator: {
-						name: `${HYPERDRIVE_PLUGIN_NAME}:${name}`,
+			([name, url]) => {
+				const database = url.pathname.replace("/", "");
+				const scheme = url.protocol.replace(":", "");
+				return {
+					name,
+					hyperdrive: {
+						designator: {
+							name: `${HYPERDRIVE_PLUGIN_NAME}:${name}`,
+						},
+						database: decodeURIComponent(database),
+						user: decodeURIComponent(url.username),
+						password: decodeURIComponent(url.password),
+						scheme,
 					},
-					database: config.database,
-					user: config.user,
-					password: config.password,
-					scheme: config.scheme,
-				},
+				};
+			}
+		);
+	},
+	getNodeBindings(options) {
+		return Object.fromEntries(
+			Object.entries(options.hyperdrives ?? {}).map(([name, url]) => {
+				const connectionOverrides: Record<string | symbol, string | number> = {
+					connectionString: `${url}`,
+					port: Number.parseInt(url.port),
+					host: url.hostname,
+				};
+				const proxyNodeBinding = new ProxyNodeBinding({
+					get(target, prop) {
+						return prop in connectionOverrides
+							? connectionOverrides[prop]
+							: target[prop];
+					},
+				});
+				return [name, proxyNodeBinding];
 			})
 		);
 	},
-	getNodeBindings() {
-		return {};
-	},
 	async getServices({ options }) {
 		return Object.entries(options.hyperdrives ?? {}).map<Service>(
-			([name, config]) => ({
+			([name, url]) => ({
 				name: `${HYPERDRIVE_PLUGIN_NAME}:${name}`,
 				external: {
-					address: `${config.host}:${config.port}`,
+					address: `${url.hostname}:${getPort(url)}`,
 					tcp: {},
 				},
 			})

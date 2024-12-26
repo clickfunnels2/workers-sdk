@@ -1,19 +1,28 @@
-Fixes # [insert GH or internal issue number(s)].
+Fixes #[insert GH or internal issue link(s)].
 
-**What this PR solves / how to test:**
+_Describe your change..._
 
-**Author has addressed the following:**
+---
+
+<!--
+Please don't delete the checkboxes <3
+The following selections do not need to be completed if this PR only contains changes to .md files
+-->
 
 - Tests
-  - [ ] Included
-  - [ ] Not necessary because:
-- Changeset ([Changeset guidelines](https://github.com/cloudflare/workers-sdk/blob/main/CONTRIBUTING.md#changesets))
-  - [ ] Included
-  - [ ] Not necessary because:
-- Associated docs
-  - [ ] Issue(s)/PR(s):
-  - [ ] Not necessary because:
+  - [ ] TODO (before merge)
+  - [ ] Tests included
+  - [ ] Tests not necessary because:
+- E2E Tests CI Job required? (Use "e2e" label or ask maintainer to run separately)
+  - [ ] I don't know
+  - [ ] Required
+  - [ ] Not required because:
+- Public documentation
+  - [ ] TODO (before merge)
+  - [ ] Cloudflare docs PR(s): <!--e.g. <https://github.com/cloudflare/cloudflare-docs/pull/>...-->
+  - [ ] Documentation not necessary because:
 
-**Note for PR author:**
-
-We want to celebrate and highlight awesome PR review! If you think this PR received a particularly high-caliber review, please assign it the label `highlight pr review` so future reviewers can take inspiration and learn from it.
+<!--
+Have you read our [Contributing guide](https://github.com/cloudflare/workers-sdk/blob/main/CONTRIBUTING.md)?
+In particular, for non-trivial changes, please always engage on the issue or create a discussion or feature request issue first before writing your code.
+-->

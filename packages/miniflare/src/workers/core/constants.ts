@@ -1,11 +1,14 @@
 export const CoreHeaders = {
 	CUSTOM_SERVICE: "MF-Custom-Service",
 	ORIGINAL_URL: "MF-Original-URL",
+	PROXY_SHARED_SECRET: "MF-Proxy-Shared-Secret",
 	DISABLE_PRETTY_ERROR: "MF-Disable-Pretty-Error",
 	ERROR_STACK: "MF-Experimental-Error-Stack",
 	ROUTE_OVERRIDE: "MF-Route-Override",
+	CF_BLOB: "MF-CF-Blob",
 
 	// API Proxy
+	OP_SECRET: "MF-Op-Secret",
 	OP: "MF-Op",
 	OP_TARGET: "MF-Op-Target",
 	OP_KEY: "MF-Op-Key",
@@ -25,6 +28,8 @@ export const CoreBindings = {
 	JSON_LOG_LEVEL: "MINIFLARE_LOG_LEVEL",
 	DATA_LIVE_RELOAD_SCRIPT: "MINIFLARE_LIVE_RELOAD_SCRIPT",
 	DURABLE_OBJECT_NAMESPACE_PROXY: "MINIFLARE_PROXY",
+	DATA_PROXY_SECRET: "MINIFLARE_PROXY_SECRET",
+	DATA_PROXY_SHARED_SECRET: "MINIFLARE_PROXY_SHARED_SECRET",
 } as const;
 
 export const ProxyOps = {
@@ -54,10 +59,13 @@ export const ProxyAddresses = {
 // there's no need to serialise the `Request`/`Response`: we just pass
 // everything to `dispatchFetch()` and return what that gives us.
 export function isFetcherFetch(targetName: string, key: string) {
-	// `DurableObject` is the internal name of `DurableObjectStub`:
-	// https://github.com/cloudflare/workerd/blob/34e3f96dae6a4ba799fe0ab9ad9f3f5a88633fc7/src/workerd/api/actor.h#L86
+	// `DurableObject` and `WorkerRpc` are the internal names of `DurableObjectStub`:
+	// https://github.com/cloudflare/workerd/blob/62b9ceee4c94d2b238692397dc4f604fef84f474/src/workerd/api/actor.h#L86
+	// https://github.com/cloudflare/workerd/blob/62b9ceee4c94d2b238692397dc4f604fef84f474/src/workerd/api/worker-rpc.h#L30
 	return (
-		(targetName === "Fetcher" || targetName === "DurableObject") &&
+		(targetName === "Fetcher" ||
+			targetName === "DurableObject" ||
+			targetName === "WorkerRpc") &&
 		key === "fetch"
 	);
 }

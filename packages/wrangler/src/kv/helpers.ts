@@ -1,9 +1,11 @@
+import { Blob } from "node:buffer";
 import { URLSearchParams } from "node:url";
 import { Miniflare } from "miniflare";
 import { FormData } from "undici";
-import { fetchListResult, fetchResult, fetchKVGetValue } from "../cfetch";
+import { fetchKVGetValue, fetchListResult, fetchResult } from "../cfetch";
 import { getLocalPersistencePath } from "../dev/get-local-persistence-path";
 import { buildPersistOptions } from "../dev/miniflare";
+import { UserError } from "../errors";
 import { logger } from "../logger";
 import type { Config } from "../config";
 import type { KVNamespace } from "@cloudflare/workers-types/experimental";
@@ -11,9 +13,9 @@ import type { ReplaceWorkersTypes } from "miniflare";
 
 /** The largest number of kv items we can pass to the API in a single request. */
 const API_MAX = 10000;
-// The const below are halved from the API's true capacity to help avoid
+// The const below are lowered from the API's true capacity to help avoid
 // hammering it with large requests.
-export const BATCH_KEY_MAX = API_MAX / 2;
+export const BATCH_KEY_MAX = API_MAX / 10;
 
 type KvArgs = {
 	binding?: string;
@@ -59,7 +61,8 @@ export interface KVNamespaceInfo {
  * Fetch a list of all the namespaces under the given `accountId`.
  */
 export async function listKVNamespaces(
-	accountId: string
+	accountId: string,
+	limitCalls: boolean = false
 ): Promise<KVNamespaceInfo[]> {
 	const pageSize = 100;
 	let page = 1;
@@ -77,6 +80,9 @@ export async function listKVNamespaces(
 		);
 		page++;
 		results.push(...json);
+		if (limitCalls) {
+			break;
+		}
 		if (json.length < pageSize) {
 			break;
 		}
@@ -199,7 +205,7 @@ function asFormData(fields: Record<string, unknown>): FormData {
 	const formData = new FormData();
 
 	for (const [name, value] of Object.entries(fields)) {
-		formData.append(name, value);
+		formData.append(name, Buffer.isBuffer(value) ? new Blob([value]) : value);
 	}
 
 	return formData;
@@ -230,7 +236,7 @@ export async function putKVKeyValue(
 				? asFormData({
 						value: keyValue.value,
 						metadata: JSON.stringify(keyValue.metadata),
-				  })
+					})
 				: keyValue.value,
 		},
 		searchParams
@@ -347,12 +353,12 @@ export function getKVNamespaceId(
 
 	// `--binding` is only valid if there's a wrangler configuration.
 	if (binding && !config) {
-		throw new Error("--binding specified, but no config file was found.");
+		throw new UserError("--binding specified, but no config file was found.");
 	}
 
 	// there's no config. abort here
 	if (!config) {
-		throw new Error(
+		throw new UserError(
 			"Failed to find a config file.\n" +
 				"Either use --namespace-id to upload directly or create a configuration file with a binding."
 		);
@@ -360,7 +366,7 @@ export function getKVNamespaceId(
 
 	// there's no KV namespaces
 	if (!config.kv_namespaces || config.kv_namespaces.length === 0) {
-		throw new Error(
+		throw new UserError(
 			"No KV Namespaces configured! Either use --namespace-id to upload directly or add a KV namespace to your wrangler config file."
 		);
 	}
@@ -369,7 +375,7 @@ export function getKVNamespaceId(
 
 	// we couldn't find a namespace with that binding
 	if (!namespace) {
-		throw new Error(
+		throw new UserError(
 			`A namespace with binding name "${binding}" was not found in the configured "kv_namespaces".`
 		);
 	}
@@ -382,7 +388,7 @@ export function getKVNamespaceId(
 		// We don't want to execute code below if preview is set to true, so we just return. Otherwise we will get errors!
 		return namespaceId;
 	} else if (preview) {
-		throw new Error(
+		throw new UserError(
 			`No preview ID found for ${binding}. Add one to your wrangler config file to use a separate namespace for previewing your worker.`
 		);
 	}
@@ -397,7 +403,7 @@ export function getKVNamespaceId(
 		// We don't want to execute code below if preview is set to true, so we just return. Otherwise we can get error!
 		return namespaceId;
 	} else if (previewIsDefined) {
-		throw new Error(
+		throw new UserError(
 			`No namespace ID found for ${binding}. Add one to your wrangler config file to use a separate namespace for previewing your worker.`
 		);
 	}
@@ -409,7 +415,7 @@ export function getKVNamespaceId(
 	if (bindingHasOnlyOneId) {
 		namespaceId = namespace.id || namespace.preview_id;
 	} else {
-		throw new Error(
+		throw new UserError(
 			`${binding} has both a namespace ID and a preview ID. Specify "--preview" or "--preview false" to avoid writing data to the wrong namespace.`
 		);
 	}
@@ -417,24 +423,13 @@ export function getKVNamespaceId(
 	// shouldn't happen. we should be able to prove this with strong typing.
 	// TODO: when we add strongly typed commands, rewrite these checks so they're exhaustive
 	if (!namespaceId) {
-		throw Error(
+		throw new Error(
 			"Something went wrong trying to determine which namespace to upload to.\n" +
 				"Please create a github issue with the command you just ran along with your wrangler configuration."
 		);
 	}
 
 	return namespaceId;
-}
-
-/**
- * KV namespace binding names must be valid JS identifiers.
- */
-export function isValidKVNamespaceBinding(
-	binding: string | undefined
-): binding is string {
-	return (
-		typeof binding === "string" && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(binding)
-	);
 }
 
 // TODO(soon): once we upgrade to TypeScript 5.2, this should actually use `using`:

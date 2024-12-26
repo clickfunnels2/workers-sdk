@@ -1,9 +1,8 @@
-import React from "react";
-import { Div } from "@cloudflare/elements";
-import { Icon } from "@cloudflare/component-icon";
-
 import { Button } from "@cloudflare/component-button";
+import { Icon } from "@cloudflare/component-icon";
+import { Div } from "@cloudflare/elements";
 import { InputField } from "../InputField";
+import type React from "react";
 
 export type HeaderEntry = [string, string];
 
@@ -36,7 +35,7 @@ const RequestHeaders: React.FC<Props> = ({ headers, onChange }) => {
 	return (
 		<Div mb={1} display="flex" flexDirection="column" gap={2}>
 			{headers.map((header, index) => (
-				<Div display="flex" gap={2} flexGrow={0}>
+				<Div display="flex" gap={2} flexGrow={0} key={header[0]}>
 					<InputField
 						name={`Header name ${index}`}
 						marginBottom={0}

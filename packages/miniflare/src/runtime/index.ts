@@ -29,10 +29,11 @@ export type SocketPorts = Map<SocketIdentifier, number /* port */>;
 
 export interface RuntimeOptions {
 	entryAddress: string;
-	loopbackPort: number;
+	loopbackAddress: string;
 	requiredSockets: SocketIdentifier[];
 	inspectorAddress?: string;
 	verbose?: boolean;
+	handleRuntimeStdio?: (stdout: Readable, stderr: Readable) => void;
 }
 
 async function waitForPorts(
@@ -75,19 +76,17 @@ function waitForExit(process: childProcess.ChildProcess): Promise<void> {
 	});
 }
 
-function pipeOutput(runtime: childProcess.ChildProcessWithoutNullStreams) {
+function pipeOutput(stdout: Readable, stderr: Readable) {
 	// TODO: may want to proxy these and prettify ✨
 	// We can't just pipe() to `process.stdout/stderr` here, as Ink (used by
 	// wrangler), only patches the `console.*` methods:
 	// https://github.com/vadimdemedes/ink/blob/5d24ed8ada593a6c36ea5416f452158461e33ba5/readme.md#patchconsole
 	// Writing directly to `process.stdout/stderr` would result in graphical
 	// glitches.
-	const stdout = rl.createInterface(runtime.stdout);
-	const stderr = rl.createInterface(runtime.stderr);
-	stdout.on("line", (data) => console.log(data));
-	stderr.on("line", (data) => console.error(red(data)));
-	// runtime.stdout.pipe(process.stdout);
-	// runtime.stderr.pipe(process.stderr);
+	rl.createInterface(stdout).on("line", (data) => console.log(data));
+	rl.createInterface(stderr).on("line", (data) => console.error(red(data)));
+	// stdout.pipe(process.stdout);
+	// stderr.pipe(process.stderr);
 }
 
 function getRuntimeCommand() {
@@ -103,7 +102,7 @@ function getRuntimeArgs(options: RuntimeOptions) {
 		// (e.g. "streams_enable_constructors"), see https://github.com/cloudflare/workerd/pull/21
 		"--experimental",
 		`--socket-addr=${SOCKET_ENTRY}=${options.entryAddress}`,
-		`--external-addr=${SERVICE_LOOPBACK}=localhost:${options.loopbackPort}`,
+		`--external-addr=${SERVICE_LOOPBACK}=${options.loopbackAddress}`,
 		// Configure extra pipe for receiving control messages (e.g. when ready)
 		"--control-fd=3",
 		// Read config from stdin
@@ -144,7 +143,9 @@ export class Runtime {
 		});
 		this.#process = runtimeProcess;
 		this.#processExitPromise = waitForExit(runtimeProcess);
-		pipeOutput(runtimeProcess);
+
+		const handleRuntimeStdio = options.handleRuntimeStdio ?? pipeOutput;
+		handleRuntimeStdio(runtimeProcess.stdout, runtimeProcess.stderr);
 
 		const controlPipe = runtimeProcess.stdio[3];
 		assert(controlPipe instanceof Readable);

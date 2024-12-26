@@ -8,15 +8,16 @@ import {
 } from "../../runtime";
 import { SharedBindings } from "../../workers";
 import {
-	PersistenceSchema,
-	Plugin,
-	SERVICE_LOOPBACK,
+	getMiniflareObjectBindings,
 	getPersistPath,
-	kProxyNodeBinding,
 	migrateDatabase,
 	namespaceEntries,
 	namespaceKeys,
 	objectEntryWorker,
+	PersistenceSchema,
+	Plugin,
+	ProxyNodeBinding,
+	SERVICE_LOOPBACK,
 } from "../shared";
 
 export const D1OptionsSchema = z.object({
@@ -46,11 +47,11 @@ export const D1_PLUGIN: Plugin<
 		return databases.map<Worker_Binding>(([name, id]) => {
 			const binding = name.startsWith("__D1_BETA__")
 				? // Used before Wrangler 3.3
-				  {
+					{
 						service: { name: `${D1_DATABASE_SERVICE_PREFIX}:${id}` },
-				  }
+					}
 				: // Used after Wrangler 3.3
-				  {
+					{
 						wrapped: {
 							moduleName: "cloudflare-internal:d1-api",
 							innerBindings: [
@@ -60,7 +61,7 @@ export const D1_PLUGIN: Plugin<
 								},
 							],
 						},
-				  };
+					};
 
 			return { name, ...binding };
 		});
@@ -68,10 +69,16 @@ export const D1_PLUGIN: Plugin<
 	getNodeBindings(options) {
 		const databases = namespaceKeys(options.d1Databases);
 		return Object.fromEntries(
-			databases.map((name) => [name, kProxyNodeBinding])
+			databases.map((name) => [name, new ProxyNodeBinding()])
 		);
 	},
-	async getServices({ options, sharedOptions, tmpPath, log }) {
+	async getServices({
+		options,
+		sharedOptions,
+		tmpPath,
+		log,
+		unsafeStickyBlobs,
+	}) {
 		const persist = sharedOptions.d1Persist;
 		const databases = namespaceEntries(options.d1Databases);
 		const services = databases.map<Service>(([_, id]) => ({
@@ -117,6 +124,7 @@ export const D1_PLUGIN: Plugin<
 							name: SharedBindings.MAYBE_SERVICE_LOOPBACK,
 							service: { name: SERVICE_LOOPBACK },
 						},
+						...getMiniflareObjectBindings(unsafeStickyBlobs),
 					],
 				},
 			};
@@ -128,5 +136,8 @@ export const D1_PLUGIN: Plugin<
 		}
 
 		return services;
+	},
+	getPersistPath({ d1Persist }, tmpPath) {
+		return getPersistPath(D1_PLUGIN_NAME, tmpPath, d1Persist);
 	},
 };

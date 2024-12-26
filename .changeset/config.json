@@ -9,5 +9,10 @@
 	"access": "public",
 	"baseBranch": "main",
 	"updateInternalDependencies": "patch",
-	"ignore": []
+	"bumpVersionsWithWorkspaceProtocolOnly": true,
+	"ignore": [],
+	"privatePackages": {
+		"tag": true,
+		"version": true
+	}
 }

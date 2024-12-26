@@ -1,4 +1,5 @@
 import { fetchResult } from "../cfetch";
+import { UserError } from "../errors";
 import { DEFAULT_MIGRATION_PATH, DEFAULT_MIGRATION_TABLE } from "./constants";
 import { listDatabases } from "./list";
 import type { Config } from "../config";
@@ -13,6 +14,12 @@ export function getDatabaseInfoFromConfig(
 			d1Database.database_id &&
 			(name === d1Database.database_name || name === d1Database.binding)
 		) {
+			if (!d1Database.database_name) {
+				throw new UserError(
+					`${name} bindings must have a "database_name" field`
+				);
+			}
+
 			return {
 				uuid: d1Database.database_id,
 				previewDatabaseUuid: d1Database.preview_database_id,
@@ -35,19 +42,17 @@ export const getDatabaseByNameOrBinding = async (
 	name: string
 ): Promise<Database> => {
 	const dbFromConfig = getDatabaseInfoFromConfig(config, name);
-	if (dbFromConfig) return dbFromConfig;
+	if (dbFromConfig) {
+		return dbFromConfig;
+	}
 
 	const allDBs = await listDatabases(accountId);
 	const matchingDB = allDBs.find((db) => db.name === name);
 	if (!matchingDB) {
-		throw new Error(`Couldn't find DB with name '${name}'`);
+		throw new UserError(`Couldn't find DB with name '${name}'`);
 	}
 	return matchingDB;
 };
-
-export const d1BetaWarning = process.env.NO_D1_WARNING
-	? ""
-	: "--------------------\n🚧 D1 is currently in open beta\n🚧 Please report any bugs to https://github.com/cloudflare/workers-sdk/issues/new/choose\n--------------------\n";
 
 export const getDatabaseInfoFromId = async (
 	accountId: string,

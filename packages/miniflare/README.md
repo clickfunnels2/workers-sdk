@@ -171,6 +171,17 @@ level will be logged.
   Creates a new logger that logs nothing to the `console`, and always `throw`s
   `message`s logged at the `ERROR` level.
 
+### `interface QueueProducerOptions`
+
+- `queueName: string`
+
+  The name of the queue where messages will be sent by the producer.
+
+- `deliveryDelay?: number`
+
+  Default number of seconds to delay the delivery of messages to consumers.
+  Value between `0` (no delay) and `42300` (12 hours).
+
 ### `interface QueueConsumerOptions`
 
 - `maxBatchSize?: number`
@@ -192,11 +203,30 @@ level will be logged.
   Name of another Queue to send a message on if it fails processing after
   `maxRetries`. If this isn't specified, failed messages will be discarded.
 
+- `retryDelay?: number`
+
+  Number of seconds to delay the (re-)delivery of messages by default. Value
+  between `0` (no delay) and `42300` (12 hours).
+
 ### `interface WorkerOptions`
 
 Options for an individual Worker/"nanoservice". All bindings are accessible on
 the global scope in service-worker format Workers, or via the 2nd `env`
 parameter in module format Workers.
+
+### `interface WorkflowOptions`
+
+- `name: string`
+
+  The name of the Workflow.
+
+- `className: string`
+
+  The name of the class exported from the Worker that implements the `WorkflowEntrypoint`.
+
+- `scriptName?`: string
+
+  The name of the script that includes the `WorkflowEntrypoint`. This is optional because it defaults to the current script if not set.
 
 #### Core
 
@@ -204,6 +234,13 @@ parameter in module format Workers.
 
   Unique name for this worker. Only required if multiple `workers` are
   specified.
+
+- `rootPath?: string`
+
+  Path against which all other path options for this Worker are resolved
+  relative to. This path is itself resolved relative to the `rootPath` from
+  `SharedOptions` if multiple workers are specified. Defaults to the current
+  working directory.
 
 - `script?: string`
 
@@ -289,7 +326,7 @@ parameter in module format Workers.
   Record mapping binding name to paths containing arbitrary binary data to
   inject as `ArrayBuffer` bindings into this Worker.
 
-- `serviceBindings?: Record<string, string | { network: Network } | { external: ExternalServer } | { disk: DiskDirectory } | (request: Request) => Awaitable<Response>>`
+- `serviceBindings?: Record<string, string | typeof kCurrentWorker | { name: string | typeof kCurrentWorker, entrypoint?: string } | { network: Network } | { external: ExternalServer } | { disk: DiskDirectory } | (request: Request, instance: Miniflare) => Awaitable<Response>>`
 
   Record mapping binding name to service designators to inject as
   `{ fetch: typeof fetch }`
@@ -298,6 +335,14 @@ parameter in module format Workers.
 
   - If the designator is a `string`, requests will be dispatched to the Worker
     with that `name`.
+  - If the designator is `(await import("miniflare")).kCurrentWorker`, requests
+    will be dispatched to the Worker defining the binding.
+  - If the designator is an object of the form `{ name: ..., entrypoint: ... }`,
+    requests will be dispatched to the entrypoint named `entrypoint` in the
+    Worker named `name`. The `entrypoint` defaults to `default`, meaning
+    `{ name: "a" }` is the same as `"a"`. If `name` is
+    `(await import("miniflare")).kCurrentWorker`, requests will be dispatched to
+    the Worker defining the binding.
   - If the designator is an object of the form `{ network: { ... } }`, where
     `network` is a
     [`workerd` `Network` struct](https://github.com/cloudflare/workerd/blob/bdbd6075c7c53948050c52d22f2dfa37bf376253/src/workerd/server/workerd.capnp#L555-L598),
@@ -313,7 +358,116 @@ parameter in module format Workers.
     directory.
   - If the designator is a function, requests will be dispatched to your custom
     handler. This allows you to access data and functions defined in Node.js
-    from your Worker.
+    from your Worker. Note `instance` will be the `Miniflare` instance
+    dispatching the request.
+
+<!--prettier-ignore-start-->
+
+- `wrappedBindings?: Record<string, string | { scriptName: string, entrypoint?: string, bindings?: Record<string, Json> }>`
+
+  Record mapping binding name to designators to inject as
+  [wrapped bindings](https://github.com/cloudflare/workerd/blob/bfcef2d850514c569c039cb84c43bc046af4ffb9/src/workerd/server/workerd.capnp#L469-L487) into this Worker.
+  Wrapped bindings allow custom bindings to be written as JavaScript functions
+  accepting an `env` parameter of "inner bindings" and returning the value to
+  bind. A `string` designator is equivalent to `{ scriptName: <string> }`.
+  `scriptName`'s bindings will be used as "inner bindings". JSON `bindings` in
+  the `designator` also become "inner bindings" and will override any of
+  `scriptName` bindings with the same name. The Worker named `scriptName`...
+
+  - Must define a single `ESModule` as its source, using
+    `{ modules: true, script: "..." }`, `{ modules: true, scriptPath: "..." }`,
+    or `{ modules: [...] }`
+  - Must provide the function to use for the wrapped binding as an `entrypoint`
+    named export or a default export if `entrypoint` is omitted
+  - Must not be the first/entrypoint worker
+  - Must not be bound to with service or Durable Object bindings
+  - Must not define `compatibilityDate` or `compatibilityFlags`
+  - Must not define `outboundService`
+  - Must not directly or indirectly have a wrapped binding to itself
+  - Must not be used as an argument to `Miniflare#getWorker()`
+
+  <details>
+	  <summary><b>Wrapped Bindings Example</b></summary>
+
+  ```ts
+  import { Miniflare } from "miniflare";
+  const store = new Map<string, string>();
+  const mf = new Miniflare({
+    workers: [
+      {
+        wrappedBindings: {
+          MINI_KV: {
+            scriptName: "mini-kv", // Use Worker named `mini-kv` for implementation
+            bindings: { NAMESPACE: "ns" }, // Override `NAMESPACE` inner binding
+          },
+        },
+        modules: true,
+        script: `export default {
+          async fetch(request, env, ctx) {
+            // Example usage of wrapped binding
+            await env.MINI_KV.set("key", "value");
+            return new Response(await env.MINI_KV.get("key"));
+          }
+        }`,
+      },
+      {
+        name: "mini-kv",
+        serviceBindings: {
+          // Function-valued service binding for accessing Node.js state
+          async STORE(request) {
+            const { pathname } = new URL(request.url);
+            const key = pathname.substring(1);
+            if (request.method === "GET") {
+              const value = store.get(key);
+              const status = value === undefined ? 404 : 200;
+              return new Response(value ?? null, { status });
+            } else if (request.method === "PUT") {
+              const value = await request.text();
+              store.set(key, value);
+              return new Response(null, { status: 204 });
+            } else if (request.method === "DELETE") {
+              store.delete(key);
+              return new Response(null, { status: 204 });
+            } else {
+              return new Response(null, { status: 405 });
+            }
+          },
+        },
+        modules: true,
+        script: `
+        // Implementation of binding
+        class MiniKV {
+          constructor(env) {
+            this.STORE = env.STORE;
+            this.baseURL = "http://x/" + (env.NAMESPACE ?? "") + ":";
+          }
+          async get(key) {
+            const res = await this.STORE.fetch(this.baseURL + key);
+            return res.status === 404 ? null : await res.text();
+          }
+          async set(key, body) {
+            await this.STORE.fetch(this.baseURL + key, { method: "PUT", body });
+          }
+          async delete(key) {
+            await this.STORE.fetch(this.baseURL + key, { method: "DELETE" });
+          }
+        }
+
+        // env has the type { STORE: Fetcher, NAMESPACE?: string }
+        export default function (env) {
+          return new MiniKV(env);
+        }
+        `,
+      },
+    ],
+  });
+  ```
+
+  </details>
+
+	> :warning: `wrappedBindings` are only supported in modules format Workers.
+
+<!--prettier-ignore-end-->
 
 - `outboundService?: string | { network: Network } | { external: ExternalServer } | { disk: DiskDirectory } | (request: Request) => Awaitable<Response>`
 
@@ -388,6 +542,16 @@ parameter in module format Workers.
   If set, only files with paths _not_ matching these glob patterns will be
   served.
 
+  - `assetsPath?: string`
+
+  Path to serve Workers assets from.
+
+  - `assetsKVBindingName?: string`
+    Name of the binding to the KV namespace that the assets are in. If `assetsPath` is set, this binding will be injected into this Worker.
+
+  - `assetsManifestBindingName?: string`
+    Name of the binding to an `ArrayBuffer` containing the binary-encoded assets manifest. If `assetsPath` is set, this binding will be injected into this Worker.
+
 #### R2
 
 - `r2Buckets?: Record<string, string> | string[]`
@@ -401,20 +565,21 @@ parameter in module format Workers.
 
 - `d1Databases?: Record<string, string> | string[]`
 
-  Record mapping binding name to D1 database IDs to inject as `Fetcher` bindings
-  into this Worker. Note these bindings must be wrapped with a facade to provide
-  the expected `D1Database` API. Different Workers may bind to the same database
-  ID with different binding names. If a `string[]` of binding names is
+  Record mapping binding name to D1 database IDs to inject as `D1Database`
+  bindings into this Worker. Note binding names starting with `__D1_BETA__` are
+  injected as `Fetcher` bindings instead, and must be wrapped with a facade to
+  provide the expected `D1Database` API. Different Workers may bind to the same
+  database ID with different binding names. If a `string[]` of binding names is
   specified, the binding name and database ID are assumed to be the same.
 
 #### Queues
 
-- `queueProducers?: Record<string, string> | string[]`
+- `queueProducers?: Record<string, QueueProducerOptions> | string[]`
 
-  Record mapping binding name to queue names to inject as `WorkerQueue` bindings
+  Record mapping binding name to queue options to inject as `WorkerQueue` bindings
   into this Worker. Different Workers may bind to the same queue name with
   different binding names. If a `string[]` of binding names is specified, the
-  binding name and queue name are assumed to be the same.
+  binding name and queue name (part of the queue options) are assumed to be the same.
 
 - `queueConsumers?: Record<string, QueueConsumerOptions> | string[]`
 
@@ -423,15 +588,46 @@ parameter in module format Workers.
   have at most one consumer. If a `string[]` of queue names is specified,
   default consumer options will be used.
 
-#### Analytics Engine
+#### Assets
+
+- `directory?: string`
+  Path to serve Workers static asset files from.
+
+- `binding?: string`
+  Binding name to inject as a `Fetcher` binding to allow access to static assets from within the Worker.
+
+- `assetOptions?: { html_handling?: HTMLHandlingOptions, not_found_handling?: NotFoundHandlingOptions}`
+  Configuration for file-based asset routing - see [docs](https://developers.cloudflare.com/workers/static-assets/routing/#routing-configuration) for options
+
+#### Workflows
+
+- `workflows?: WorkflowOptions[]`
+  Configuration for one or more Workflows in your project.
+
+#### Analytics Engine, Sending Email, Vectorize and Workers for Platforms
 
 _Not yet supported_
+
+If you need support for these locally, consider using the `wrappedBindings`
+option to mock them out.
+
+#### Browser Rendering and Workers AI
+
+_Not yet supported_
+
+If you need support for these locally, consider using the `serviceBindings`
+option to mock them out.
 
 ### `interface SharedOptions`
 
 Options shared between all Workers/"nanoservices".
 
 #### Core
+
+- `rootPath?: string`
+
+  Path against which all other path options for this instance are resolved
+  relative to. Defaults to the current working directory.
 
 - `host?: string`
 
@@ -548,7 +744,11 @@ Options shared between all Workers/"nanoservices".
 
   Where to persist data stored in D1 databases. See docs for `Persistence`.
 
-#### Analytics Engine
+- `workflowsPersist?: Persistence`
+
+Where to persist data stored in Workflows. See docs for `Persistence`.
+
+#### Analytics Engine, Browser Rendering, Sending Email, Vectorize, Workers AI and Workers for Platforms
 
 _Not yet supported_
 
@@ -662,3 +862,20 @@ defined at the top-level.
   `Miniflare#dispatchFetch()` cannot be called. Additionally, calling this
   function will invalidate any values returned by the `Miniflare#get*()`
   methods, preventing them from being used.
+
+- `getCf(): Promise<Record<string, any>>`
+
+  Returns the same object returned from incoming `Request`'s `cf` property. This
+  object depends on the `cf` property from `SharedOptions`.
+
+## Configuration
+
+### Local `workerd`
+
+You can override the `workerd` binary being used by miniflare with a your own local build by setting the `MINIFLARE_WORKERD_PATH` environment variable.
+
+For example:
+
+```shell
+$ export MINIFLARE_WORKERD_PATH="<WORKERD_REPO_DIR>/bazel-bin/src/workerd/server/workerd"
+```

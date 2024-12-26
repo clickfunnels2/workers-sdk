@@ -4,21 +4,25 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-import workersTypes from "raw:@cloudflare/workers-types/experimental/index.d.ts";
+import workersTypes from "raw:workers-types";
 import {
 	Disposable,
 	EventEmitter,
 	FileChangeType,
+	FilePermission,
 	FileSystemError,
 	FileType,
 	Position,
 	Range,
 	Uri,
 	workspace,
-	FilePermission,
 } from "vscode";
-import type { Channel, FromQuickEditMessage, ToQuickEditMessage } from "./ipc";
-import type { WorkerLoadedMessage } from "./ipc";
+import type {
+	Channel,
+	FromQuickEditMessage,
+	ToQuickEditMessage,
+	WorkerLoadedMessage,
+} from "./ipc";
 import type {
 	CancellationToken,
 	Event,
@@ -32,8 +36,8 @@ import type {
 	ProviderResult,
 	TextSearchComplete,
 	TextSearchOptions,
-	TextSearchQuery,
 	TextSearchProvider,
+	TextSearchQuery,
 	TextSearchResult,
 } from "vscode";
 
@@ -47,7 +51,10 @@ export class File implements FileStat {
 	data?: Uint8Array;
 	permissions?: FilePermission;
 
-	constructor(public uri: Uri, name: string) {
+	constructor(
+		public uri: Uri,
+		name: string
+	) {
 		this.type = FileType.File;
 		this.ctime = Date.now();
 		this.mtime = Date.now();
@@ -68,7 +75,10 @@ export class Directory implements FileStat {
 	name: string;
 	entries: Map<string, File | Directory>;
 
-	constructor(public uri: Uri, name: string) {
+	constructor(
+		public uri: Uri,
+		name: string
+	) {
 		this.type = FileType.Directory;
 		this.ctime = Date.now();
 		this.mtime = Date.now();
@@ -188,6 +198,7 @@ declare module "*.bin" {
 				create: true,
 				overwrite: true,
 				suppressChannelUpdate: true,
+				readOnly: files.readOnly,
 			});
 		}
 		if (this.readRoot !== null) {
@@ -249,7 +260,7 @@ declare module "*.bin" {
 		if (!entry) {
 			entry = new File(uri, basename);
 			parent.entries.set(basename, entry);
-			if (!options.suppressChannelUpdate)
+			if (!options.suppressChannelUpdate) {
 				this.channel.postMessage({
 					type: "CreateFile",
 					body: {
@@ -257,6 +268,7 @@ declare module "*.bin" {
 						contents: content,
 					},
 				});
+			}
 			this._fireSoon({ type: FileChangeType.Created, uri });
 		}
 		entry.mtime = Date.now();
@@ -265,7 +277,7 @@ declare module "*.bin" {
 		if (options.readOnly) {
 			entry.setReadOnly();
 		}
-		if (!options.suppressChannelUpdate)
+		if (!options.suppressChannelUpdate) {
 			this.channel.postMessage({
 				type: "UpdateFile",
 				body: {
@@ -273,6 +285,7 @@ declare module "*.bin" {
 					contents: content,
 				},
 			});
+		}
 		this._fireSoon({ type: FileChangeType.Changed, uri });
 	}
 
@@ -515,10 +528,10 @@ declare module "*.bin" {
 		_options: FileSearchOptions,
 		_token: CancellationToken
 	): ProviderResult<Uri[]> {
-		return this._findFiles(query.pattern);
+		return this._findFiles(query.pattern, _options.excludes);
 	}
 
-	private _findFiles(query: string | undefined): Uri[] {
+	private _findFiles(query: string | undefined, excludes: string[]): Uri[] {
 		const files = this._getFiles();
 		const result: Uri[] = [];
 
@@ -526,8 +539,23 @@ declare module "*.bin" {
 			? new RegExp(this._convertSimple2RegExpPattern(query))
 			: null;
 
+		// The memfs implementation does not support the `files.exclude` and `search.exclude` settings
+		// This implements a simple mechanism to filter out files by matching against the file path
+		// e.g. Both `package.json` and `**/package.json` will exclude all files named `package.json` in any folder
+		const excludePatterns = excludes.map((exclude) => {
+			if (!exclude) {
+				return null;
+			}
+
+			return new RegExp(this._convertSimple2RegExpPattern(exclude));
+		});
+
 		for (const file of files) {
-			if (!pattern || pattern.exec(file.name)) {
+			if (
+				(!pattern || pattern.exec(file.name)) &&
+				// Ensure the file is not excluded
+				!excludePatterns.some((regex) => regex?.exec(file.uri.path))
+			) {
 				result.push(file.uri);
 			}
 		}
@@ -545,7 +573,7 @@ declare module "*.bin" {
 	) {
 		const result: TextSearchComplete = { limitHit: false };
 
-		const files = this._findFiles(options.includes[0]);
+		const files = this._findFiles(options.includes[0], options.excludes);
 		if (files) {
 			for (const file of files) {
 				const content = this._textDecoder.decode(await this.readFile(file));

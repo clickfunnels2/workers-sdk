@@ -1,7 +1,6 @@
 import assert from "assert";
 import crypto from "crypto";
 import fs from "fs/promises";
-import type { CacheStorage } from "@cloudflare/workers-types/experimental";
 import {
 	CACHE_PLUGIN_NAME,
 	HeadersInit,
@@ -15,10 +14,11 @@ import {
 } from "miniflare";
 import {
 	MiniflareDurableObjectControlStub,
-	MiniflareTestContext,
 	miniflareTest,
+	MiniflareTestContext,
 	useTmp,
 } from "../../test-shared";
+import type { CacheStorage } from "@cloudflare/workers-types/experimental";
 
 interface Context extends MiniflareTestContext {
 	caches: ReplaceWorkersTypes<CacheStorage>;
@@ -53,6 +53,18 @@ async function getControlStub(
 	const stub = new MiniflareDurableObjectControlStub(objectStub);
 	await stub.enableFakeTimers(1_000_000);
 	return stub;
+}
+
+function sqlStmts(object: MiniflareDurableObjectControlStub) {
+	return {
+		getBlobIdByKey: async (key: string): Promise<string | undefined> => {
+			const rows = await object.sqlQuery<{ blob_id: string }>(
+				"SELECT blob_id FROM _mf_entries WHERE key = ?",
+				key
+			);
+			return rows[0]?.blob_id;
+		},
+	};
 }
 
 test.beforeEach(async (t) => {
@@ -229,6 +241,31 @@ test("match respects Range header", async (t) => {
 	);
 	assert(res !== undefined);
 	t.is(res.status, 416);
+});
+test("put overrides existing responses", async (t) => {
+	const cache = t.context.caches.default;
+	const defaultObject = t.context.defaultObject;
+	const stmts = sqlStmts(defaultObject);
+
+	const resToCache = (body: string) =>
+		new Response(body, { headers: { "Cache-Control": "max-age=3600" } });
+
+	const key = "http://localhost/cache-override";
+	await cache.put(key, resToCache("body1"));
+	const blobId = await stmts.getBlobIdByKey(key);
+	assert(blobId !== undefined);
+	await cache.put(key, resToCache("body2"));
+	const res = await cache.match(key);
+	t.is(await res?.text(), "body2");
+
+	// Check deletes old blob
+	await defaultObject.waitForFakeTasks();
+	t.is(await defaultObject.getBlob(blobId), null);
+
+	// Check created new blob
+	const newBlobId = await stmts.getBlobIdByKey(key);
+	assert(newBlobId !== undefined);
+	t.not(blobId, newBlobId);
 });
 
 // Note this macro must be used with `test.serial` to avoid races.

@@ -1,11 +1,12 @@
 import { fetch } from "undici";
+import { vi } from "vitest";
 import {
-	stopWorkerRegistry,
 	registerWorker,
 	startWorkerRegistry,
+	stopWorkerRegistry,
 } from "../dev-registry";
 
-jest.unmock("undici");
+vi.unmock("undici");
 
 /**
  * Sometimes the devRegistry killed by some reason, the register worker will to restart it.
@@ -23,7 +24,7 @@ describe("unstable devRegistry testing", () => {
 			mode: "local",
 			durableObjects: [{ name: "testing", className: "testing" }],
 		});
-		const resp = await fetch("http://localhost:6284/workers");
+		const resp = await fetch("http://127.0.0.1:6284/workers");
 		if (resp) {
 			const parsedResp = (await resp.json()) as {
 				test: unknown;
@@ -35,7 +36,7 @@ describe("unstable devRegistry testing", () => {
 	it("should not restart the devRegistry if the devRegistry already start", async () => {
 		await startWorkerRegistry();
 
-		await fetch("http://localhost:6284/workers/init", {
+		await fetch("http://127.0.0.1:6284/workers/init", {
 			method: "POST",
 			body: JSON.stringify({}),
 		});
@@ -48,7 +49,7 @@ describe("unstable devRegistry testing", () => {
 			durableObjects: [{ name: "testing", className: "testing" }],
 		});
 
-		const resp = await fetch("http://localhost:6284/workers");
+		const resp = await fetch("http://127.0.0.1:6284/workers");
 		if (resp) {
 			const parsedResp = (await resp.json()) as {
 				test: unknown;

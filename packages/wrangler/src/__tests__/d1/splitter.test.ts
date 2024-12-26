@@ -241,7 +241,7 @@ describe("splitSqlQuery()", () => {
 	`);
 	});
 
-	it("should handle compound statements", () => {
+	it("should handle compound statements for BEGINs", () => {
 		expect(
 			splitSqlQuery(`
     CREATE TRIGGER IF NOT EXISTS update_trigger AFTER UPDATE ON items
@@ -274,5 +274,128 @@ describe("splitSqlQuery()", () => {
 		    END",
 		]
 	`);
+
+		expect(
+			splitSqlQuery(`
+	CREATE TRIGGER IF NOT EXISTS update_trigger AFTER UPDATE ON items
+	begin
+		DELETE FROM updates WHERE item_id=old.id;
+	END;
+	CREATE TRIGGER IF NOT EXISTS actors_search_fts_update AFTER UPDATE ON actors
+	begin
+		DELETE FROM search_fts WHERE rowid=old.rowid;
+		INSERT INTO search_fts (rowid, type, name, preferredUsername)
+		VALUES (new.rowid,
+				new.type,
+				json_extract(new.properties, '$.name'),
+				json_extract(new.properties, '$.preferredUsername'));
+	END;`)
+		).toMatchInlineSnapshot(`
+			Array [
+			  "CREATE TRIGGER IF NOT EXISTS update_trigger AFTER UPDATE ON items
+				begin
+					DELETE FROM updates WHERE item_id=old.id;
+				END",
+			  "CREATE TRIGGER IF NOT EXISTS actors_search_fts_update AFTER UPDATE ON actors
+				begin
+					DELETE FROM search_fts WHERE rowid=old.rowid;
+					INSERT INTO search_fts (rowid, type, name, preferredUsername)
+					VALUES (new.rowid,
+							new.type,
+							json_extract(new.properties, '$.name'),
+							json_extract(new.properties, '$.preferredUsername'));
+				END",
+			]
+		`);
+	});
+
+	it("should handle compound statements for CASEs", () => {
+		expect(
+			splitSqlQuery(`
+				CREATE TRIGGER test_after_insert_trigger AFTER
+				INSERT ON test BEGIN
+				SELECT CASE
+						WHEN NOT EXISTS
+									(SELECT 1
+										FROM pragma_table_list(new."table")) THEN RAISE (
+																																		ABORT,
+																																		'Exception, table does not exist')
+				END ; END ;
+
+				CREATE TRIGGER test_after_insert_trigger AFTER
+				INSERT ON test BEGIN
+				SELECT CASE
+						WHEN NOT EXISTS
+									(SELECT 1
+										FROM pragma_table_list(new."table")) THEN RAISE (
+																																		ABORT,
+																																		'Exception, table does not exist')
+				END ; END ;`)
+		).toMatchInlineSnapshot(`
+		Array [
+		  "CREATE TRIGGER test_after_insert_trigger AFTER
+						INSERT ON test BEGIN
+						SELECT CASE
+								WHEN NOT EXISTS
+											(SELECT 1
+												FROM pragma_table_list(new.\\"table\\")) THEN RAISE (
+																																				ABORT,
+																																				'Exception, table does not exist')
+						END ; END",
+		  "CREATE TRIGGER test_after_insert_trigger AFTER
+						INSERT ON test BEGIN
+						SELECT CASE
+								WHEN NOT EXISTS
+											(SELECT 1
+												FROM pragma_table_list(new.\\"table\\")) THEN RAISE (
+																																				ABORT,
+																																				'Exception, table does not exist')
+						END ; END",
+		]
+	`);
+
+		expect(
+			splitSqlQuery(`
+			CREATE TRIGGER test_after_insert_trigger AFTER
+			INSERT ON test BEGIN
+			SELECT case
+					WHEN NOT EXISTS
+								(SELECT 1
+									FROM pragma_table_list(new."table")) THEN RAISE (
+																																	ABORT,
+																																	'Exception, table does not exist')
+			END ; END ;
+
+			CREATE TRIGGER test_after_insert_trigger AFTER
+			INSERT ON test BEGIN
+			SELECT case
+					WHEN NOT EXISTS
+								(SELECT 1
+									FROM pragma_table_list(new."table")) THEN RAISE (
+																																	ABORT,
+																																	'Exception, table does not exist')
+			END ; END ;`)
+		).toMatchInlineSnapshot(`
+			Array [
+			  "CREATE TRIGGER test_after_insert_trigger AFTER
+						INSERT ON test BEGIN
+						SELECT case
+								WHEN NOT EXISTS
+											(SELECT 1
+												FROM pragma_table_list(new.\\"table\\")) THEN RAISE (
+																																				ABORT,
+																																				'Exception, table does not exist')
+						END ; END",
+			  "CREATE TRIGGER test_after_insert_trigger AFTER
+						INSERT ON test BEGIN
+						SELECT case
+								WHEN NOT EXISTS
+											(SELECT 1
+												FROM pragma_table_list(new.\\"table\\")) THEN RAISE (
+																																				ABORT,
+																																				'Exception, table does not exist')
+						END ; END",
+			]
+		`);
 	});
 });

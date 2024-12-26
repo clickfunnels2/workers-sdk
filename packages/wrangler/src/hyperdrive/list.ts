@@ -1,20 +1,19 @@
 import { readConfig } from "../config";
 import { logger } from "../logger";
 import { listConfigs } from "./client";
-import { hyperdriveBetaWarning } from "./common";
 import type {
 	CommonYargsArgv,
 	StrictYargsOptionsToInterface,
 } from "../yargs-types";
 
 export function options(yargs: CommonYargsArgv) {
-	return yargs.epilogue(hyperdriveBetaWarning);
+	return yargs;
 }
 
 export async function handler(
 	args: StrictYargsOptionsToInterface<typeof options>
 ) {
-	const config = readConfig(args.config, args);
+	const config = readConfig(args);
 
 	logger.log(`📋 Listing Hyperdrive configs`);
 	const databases = await listConfigs(config);

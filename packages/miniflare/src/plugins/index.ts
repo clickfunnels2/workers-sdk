@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { ValueOf } from "../workers";
+import { ASSETS_PLUGIN } from "./assets";
+import { ASSETS_PLUGIN_NAME } from "./assets/constants";
 import { CACHE_PLUGIN, CACHE_PLUGIN_NAME } from "./cache";
 import { CORE_PLUGIN, CORE_PLUGIN_NAME } from "./core";
 import { D1_PLUGIN, D1_PLUGIN_NAME } from "./d1";
@@ -8,6 +10,8 @@ import { HYPERDRIVE_PLUGIN, HYPERDRIVE_PLUGIN_NAME } from "./hyperdrive";
 import { KV_PLUGIN, KV_PLUGIN_NAME } from "./kv";
 import { QUEUES_PLUGIN, QUEUES_PLUGIN_NAME } from "./queues";
 import { R2_PLUGIN, R2_PLUGIN_NAME } from "./r2";
+import { RATELIMIT_PLUGIN, RATELIMIT_PLUGIN_NAME } from "./ratelimit";
+import { WORKFLOWS_PLUGIN, WORKFLOWS_PLUGIN_NAME } from "./workflows";
 
 export const PLUGINS = {
 	[CORE_PLUGIN_NAME]: CORE_PLUGIN,
@@ -18,6 +22,9 @@ export const PLUGINS = {
 	[QUEUES_PLUGIN_NAME]: QUEUES_PLUGIN,
 	[R2_PLUGIN_NAME]: R2_PLUGIN,
 	[HYPERDRIVE_PLUGIN_NAME]: HYPERDRIVE_PLUGIN,
+	[RATELIMIT_PLUGIN_NAME]: RATELIMIT_PLUGIN,
+	[ASSETS_PLUGIN_NAME]: ASSETS_PLUGIN,
+	[WORKFLOWS_PLUGIN_NAME]: WORKFLOWS_PLUGIN,
 };
 export type Plugins = typeof PLUGINS;
 
@@ -56,20 +63,24 @@ export type Plugins = typeof PLUGINS;
 //
 // Considering we don't have too many plugins, we now just define these types
 // manually, which has the added benefit of faster type checking.
-export type WorkerOptions = z.infer<typeof CORE_PLUGIN.options> &
-	z.infer<typeof CACHE_PLUGIN.options> &
-	z.infer<typeof D1_PLUGIN.options> &
-	z.infer<typeof DURABLE_OBJECTS_PLUGIN.options> &
-	z.infer<typeof KV_PLUGIN.options> &
-	z.infer<typeof QUEUES_PLUGIN.options> &
-	z.infer<typeof R2_PLUGIN.options> &
-	z.input<typeof HYPERDRIVE_PLUGIN.options>;
-export type SharedOptions = z.infer<typeof CORE_PLUGIN.sharedOptions> &
-	z.infer<typeof CACHE_PLUGIN.sharedOptions> &
-	z.infer<typeof D1_PLUGIN.sharedOptions> &
-	z.infer<typeof DURABLE_OBJECTS_PLUGIN.sharedOptions> &
-	z.infer<typeof KV_PLUGIN.sharedOptions> &
-	z.infer<typeof R2_PLUGIN.sharedOptions>;
+export type WorkerOptions = z.input<typeof CORE_PLUGIN.options> &
+	z.input<typeof CACHE_PLUGIN.options> &
+	z.input<typeof D1_PLUGIN.options> &
+	z.input<typeof DURABLE_OBJECTS_PLUGIN.options> &
+	z.input<typeof KV_PLUGIN.options> &
+	z.input<typeof QUEUES_PLUGIN.options> &
+	z.input<typeof R2_PLUGIN.options> &
+	z.input<typeof HYPERDRIVE_PLUGIN.options> &
+	z.input<typeof RATELIMIT_PLUGIN.options> &
+	z.input<typeof ASSETS_PLUGIN.options> &
+	z.input<typeof WORKFLOWS_PLUGIN.options>;
+export type SharedOptions = z.input<typeof CORE_PLUGIN.sharedOptions> &
+	z.input<typeof CACHE_PLUGIN.sharedOptions> &
+	z.input<typeof D1_PLUGIN.sharedOptions> &
+	z.input<typeof DURABLE_OBJECTS_PLUGIN.sharedOptions> &
+	z.input<typeof KV_PLUGIN.sharedOptions> &
+	z.input<typeof R2_PLUGIN.sharedOptions> &
+	z.input<typeof WORKFLOWS_PLUGIN.sharedOptions>;
 
 export const PLUGIN_ENTRIES = Object.entries(PLUGINS) as [
 	keyof Plugins,
@@ -86,6 +97,7 @@ export {
 	SERVICE_ENTRY,
 	CoreOptionsSchema,
 	CoreSharedOptionsSchema,
+	compileModuleRules,
 	createFetchMock,
 	getGlobalServices,
 	ModuleRuleTypeSchema,
@@ -93,13 +105,18 @@ export {
 	ModuleDefinitionSchema,
 	SourceOptionsSchema,
 	ProxyClient,
+	getFreshSourceMapSupport,
+	kCurrentWorker,
+	getNodeCompat,
 } from "./core";
 export type {
+	CompiledModuleRule,
 	ModuleRuleType,
 	ModuleRule,
 	ModuleDefinition,
 	GlobalServicesOptions,
 	SourceOptions,
+	NodeJSCompatMode,
 } from "./core";
 export type * from "./core/proxy/types";
 export * from "./d1";
@@ -108,3 +125,7 @@ export * from "./kv";
 export * from "./queues";
 export * from "./r2";
 export * from "./hyperdrive";
+export * from "./ratelimit";
+export * from "./assets";
+export * from "./assets/schema";
+export * from "./workflows";

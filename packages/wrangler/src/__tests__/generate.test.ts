@@ -1,11 +1,15 @@
 import fs from "node:fs";
 import path from "node:path";
-import { type PackageManager, getPackageManager } from "../package-manager";
+import { execa } from "execa";
+import { vi } from "vitest";
+import { getPackageManager } from "../package-manager";
 import { mockConsoleMethods } from "./helpers/mock-console";
 import { mockConfirm } from "./helpers/mock-dialogs";
 import { useMockIsTTY } from "./helpers/mock-istty";
 import { runInTempDir } from "./helpers/run-in-tmp";
 import { runWrangler } from "./helpers/run-wrangler";
+import type { PackageManager } from "../package-manager";
+import type { Mock } from "vitest";
 
 describe("generate", () => {
 	runInTempDir();
@@ -18,16 +22,16 @@ describe("generate", () => {
 		mockPackageManager = {
 			cwd: process.cwd(),
 			type: "mockpm" as "npm",
-			addDevDeps: jest.fn(),
-			install: jest.fn(),
+			addDevDeps: vi.fn(),
+			install: vi.fn(),
 		};
-		(getPackageManager as jest.Mock).mockResolvedValue(mockPackageManager);
+		(getPackageManager as Mock).mockResolvedValue(mockPackageManager);
 	});
 
 	describe("cli functionality", () => {
 		afterEach(() => {});
 
-		it("defers to `wrangler init` when no template is given", async () => {
+		it("delegates to `wrangler init` when no template is given", async () => {
 			mockConfirm(
 				{
 					text: "Would you like to use git to manage this Worker?",
@@ -42,37 +46,49 @@ describe("generate", () => {
 			expect(std.out).toMatchInlineSnapshot(
 				`"✨ Created no-template/wrangler.toml"`
 			);
-			expect(std.warn).toMatchInlineSnapshot(`
-			"[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mThe \`init\` command is no longer supported. Please use \`mockpm create cloudflare/@2 no-template\` instead.[0m
+			expect(std.warn).toMatchInlineSnapshot(`""`);
+		});
 
-			  The \`init\` command will be removed in a future version.
-
-			"
-		`);
+		it("delegates to create cloudflare if Cloudflare template path is given", async () => {
+			await runWrangler("generate worker-name worker-d1");
+			expect(execa).toHaveBeenCalledWith(
+				"mockpm",
+				[
+					"create",
+					"cloudflare@^2.5.0",
+					"worker-name",
+					"--accept-defaults",
+					"--no-deploy",
+					"--no-open",
+				],
+				{
+					stdio: "inherit",
+				}
+			);
 		});
 
 		it("complains when given the --type argument", async () => {
 			await expect(
 				runWrangler("generate worker-name worker-template --type rust")
 			).rejects.toThrowErrorMatchingInlineSnapshot(
-				`"The --type option is no longer supported."`
+				`[Error: The --type option is no longer supported.]`
 			);
 		});
 
 		it("complains when given the --site argument", async () => {
 			await expect(runWrangler("generate worker-name worker-template --site"))
 				.rejects.toThrowErrorMatchingInlineSnapshot(`
-					"The --site option is no longer supported.
-					If you wish to create a brand new Worker Sites project then clone the \`worker-sites-template\` starter repository:
+				[Error: The --site option is no longer supported.
+				If you wish to create a brand new Worker Sites project then clone the \`worker-sites-template\` starter repository:
 
-					\`\`\`
-					git clone --depth=1 --branch=wrangler2 https://github.com/cloudflare/worker-sites-template worker-name
-					cd worker-name
-					\`\`\`
+				\`\`\`
+				git clone --depth=1 --branch=wrangler2 https://github.com/cloudflare/worker-sites-template worker-name
+				cd worker-name
+				\`\`\`
 
-					Find out more about how to create and maintain Sites projects at https://developers.cloudflare.com/workers/platform/sites.
-					Have you considered using Cloudflare Pages instead? See https://pages.cloudflare.com/."
-				`);
+				Find out more about how to create and maintain Sites projects at https://developers.cloudflare.com/workers/platform/sites.
+				Have you considered using Cloudflare Pages instead? See https://pages.cloudflare.com/.]
+			`);
 		});
 
 		it.skip("auto-increments the worker directory name", async () => {
@@ -124,25 +140,6 @@ describe("generate", () => {
 	});
 
 	describe("cloning", () => {
-		it("clones a cloudflare template with sparse checkouts", async () => {
-			await expect(
-				runWrangler("generate my-worker worker-typescript")
-			).resolves.toBeUndefined();
-
-			expect(readDirectory("my-worker")).toMatchObject<Directory>({
-				".git": expect.any(Object),
-				".gitignore": expect.any(String),
-				"README.md": expect.stringContaining("Template: worker-typescript"),
-				"package.json": expect.stringContaining("@cloudflare/workers-types"),
-				src: expect.objectContaining({
-					"index.ts": expect.any(String),
-					"index.test.ts": expect.any(String),
-				}),
-				"tsconfig.json": expect.any(String),
-				"wrangler.toml": expect.any(String),
-			});
-		});
-
 		// mocking out calls to either `isGitInstalled` or `execa("git", ["--version"])`
 		// was harder than i thought, leaving this for now.
 		it.todo("clones a cloudflare template with full checkouts");
@@ -219,50 +216,6 @@ describe("generate", () => {
 				"tsconfig.json": expect.any(String),
 				"wrangler.toml": expect.any(String),
 			});
-		});
-
-		it("clones a cloudflare template across drives", async () => {
-			const fsMock = jest.spyOn(fs, "renameSync").mockImplementation(() => {
-				// Simulate the error we get if we use renameSync across different Windows drives (e.g. C: to D:).
-				const error = new Error("EXDEV: cross-device link not permitted");
-				// @ts-expect-error non standard property on Error
-				error.code = "EXDEV";
-				throw error;
-			});
-			await expect(
-				runWrangler("generate my-worker worker-typescript")
-			).resolves.toBeUndefined();
-
-			expect(readDirectory("my-worker")).toMatchObject<Directory>({
-				".git": expect.any(Object),
-				".gitignore": expect.any(String),
-				"README.md": expect.stringContaining("Template: worker-typescript"),
-				"package.json": expect.stringContaining("@cloudflare/workers-types"),
-				src: expect.objectContaining({
-					"index.ts": expect.any(String),
-					"index.test.ts": expect.any(String),
-				}),
-				"tsconfig.json": expect.any(String),
-				"wrangler.toml": expect.any(String),
-			});
-
-			fsMock.mockRestore();
-		});
-
-		it("mocks an error thrown", async () => {
-			const fsMock = jest.spyOn(fs, "renameSync").mockImplementation(() => {
-				// Simulate a different error to what we get if we use renameSync across different Windows drives.
-				const error = new Error("something");
-				// @ts-expect-error non standard property on Error
-				error.code = "unknown";
-				throw error;
-			});
-
-			await expect(
-				runWrangler("generate my-worker worker-typescript")
-			).rejects.toThrow();
-
-			fsMock.mockRestore();
 		});
 	});
 });

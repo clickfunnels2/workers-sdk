@@ -1,13 +1,12 @@
 {
 	"name": "node-app-pages",
-	"version": "0.0.0",
 	"private": true,
 	"sideEffects": false,
 	"main": "dist/worker.js",
 	"scripts": {
 		"check:type": "tsc",
-		"dev": "npx wrangler pages dev public --port 12345 --node-compat",
-		"test": "vitest run",
+		"dev": "wrangler pages dev public --port 12345 --node-compat",
+		"test:ci": "vitest run",
 		"test:watch": "vitest",
 		"type:tests": "tsc -p ./tests/tsconfig.json"
 	},
@@ -16,11 +15,16 @@
 	},
 	"devDependencies": {
 		"@cloudflare/workers-tsconfig": "workspace:*",
-		"@cloudflare/workers-types": "^4.20221111.1",
-		"undici": "^5.9.1",
+		"@cloudflare/workers-types": "^4.20241218.0",
+		"typescript": "catalog:default",
+		"undici": "catalog:default",
+		"vitest": "catalog:default",
 		"wrangler": "workspace:*"
 	},
 	"engines": {
 		"node": ">=16.13"
+	},
+	"volta": {
+		"extends": "../../package.json"
 	}
 }

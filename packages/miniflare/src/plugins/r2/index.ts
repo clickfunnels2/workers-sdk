@@ -8,15 +8,16 @@ import {
 } from "../../runtime";
 import { SharedBindings } from "../../workers";
 import {
-	PersistenceSchema,
-	Plugin,
-	SERVICE_LOOPBACK,
+	getMiniflareObjectBindings,
 	getPersistPath,
-	kProxyNodeBinding,
 	migrateDatabase,
 	namespaceEntries,
 	namespaceKeys,
 	objectEntryWorker,
+	PersistenceSchema,
+	Plugin,
+	ProxyNodeBinding,
+	SERVICE_LOOPBACK,
 } from "../shared";
 
 export const R2OptionsSchema = z.object({
@@ -50,9 +51,17 @@ export const R2_PLUGIN: Plugin<
 	},
 	getNodeBindings(options) {
 		const buckets = namespaceKeys(options.r2Buckets);
-		return Object.fromEntries(buckets.map((name) => [name, kProxyNodeBinding]));
+		return Object.fromEntries(
+			buckets.map((name) => [name, new ProxyNodeBinding()])
+		);
 	},
-	async getServices({ options, sharedOptions, tmpPath, log }) {
+	async getServices({
+		options,
+		sharedOptions,
+		tmpPath,
+		log,
+		unsafeStickyBlobs,
+	}) {
 		const persist = sharedOptions.r2Persist;
 		const buckets = namespaceEntries(options.r2Buckets);
 		const services = buckets.map<Service>(([_, id]) => ({
@@ -97,6 +106,7 @@ export const R2_PLUGIN: Plugin<
 							name: SharedBindings.MAYBE_SERVICE_LOOPBACK,
 							service: { name: SERVICE_LOOPBACK },
 						},
+						...getMiniflareObjectBindings(unsafeStickyBlobs),
 					],
 				},
 			};
@@ -108,5 +118,8 @@ export const R2_PLUGIN: Plugin<
 		}
 
 		return services;
+	},
+	getPersistPath({ r2Persist }, tmpPath) {
+		return getPersistPath(R2_PLUGIN_NAME, tmpPath, r2Persist);
 	},
 };

@@ -2,14 +2,12 @@ import { printWranglerBanner } from "../..";
 import { fetchResult } from "../../cfetch";
 import { withConfig } from "../../config";
 import { confirm } from "../../dialogs";
+import { UserError } from "../../errors";
 import { logger } from "../../logger";
 import { requireAuth } from "../../user";
 import { Database } from "../options";
 import { getDatabaseByNameOrBinding } from "../utils";
-import {
-	checkIfDatabaseIsExperimental,
-	getBookmarkIdFromTimestamp,
-} from "./utils";
+import { getBookmarkIdFromTimestamp, throwIfDatabaseIsAlpha } from "./utils";
 import type {
 	CommonYargsArgv,
 	StrictYargsOptionsToInterface,
@@ -39,11 +37,11 @@ export function RestoreOptions(yargs: CommonYargsArgv) {
 			) {
 				return true;
 			} else if (argv.timestamp && argv.bookmark) {
-				throw new Error(
+				throw new UserError(
 					"Provide either a timestamp, or a bookmark - not both."
 				);
 			} else {
-				throw new Error("Provide either a timestamp or a bookmark");
+				throw new UserError("Provide either a timestamp or a bookmark");
 			}
 		});
 }
@@ -55,7 +53,7 @@ export const RestoreHandler = withConfig<HandlerOptions>(
 		// bookmark
 		const accountId = await requireAuth(config);
 		const db = await getDatabaseByNameOrBinding(config, accountId, database);
-		await checkIfDatabaseIsExperimental(accountId, db.uuid);
+		await throwIfDatabaseIsAlpha(accountId, db.uuid);
 		const searchParams = new URLSearchParams();
 
 		if (timestamp) {
@@ -100,7 +98,7 @@ const handleRestore = async (
 	searchParams: URLSearchParams
 ) => {
 	return await fetchResult<RestoreBookmarkResponse>(
-		`/accounts/${accountId}/d1/database/${databaseId}/time-travel/restore?${searchParams.toString()}`,
+		`/accounts/${accountId}/d1/database/${databaseId}/time_travel/restore?${searchParams.toString()}`,
 		{
 			headers: {
 				"Content-Type": "application/json",

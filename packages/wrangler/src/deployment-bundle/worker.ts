@@ -1,4 +1,10 @@
-import type { Route } from "../config/environment";
+import type { Observability, Route } from "../config/environment";
+import type { INHERIT_SYMBOL } from "./bindings";
+import type {
+	WorkerMetadata,
+	WorkerMetadataBinding,
+} from "./create-worker-upload-form";
+import type { AssetConfig, RoutingConfig } from "@cloudflare/workers-shared";
 import type { Json } from "miniflare";
 
 /**
@@ -14,7 +20,10 @@ export type CfModuleType =
 	| "commonjs"
 	| "compiled-wasm"
 	| "text"
-	| "buffer";
+	| "buffer"
+	| "python"
+	| "python-requirement"
+	| "nodejs-compat-module";
 
 /**
  * An imported module.
@@ -48,6 +57,12 @@ export interface CfModule {
 	 */
 	content: string | Buffer;
 	/**
+	 * An optional sourcemap for this module if it's of a ESM or CJS type, this will only be present
+	 * if we're deploying with sourcemaps enabled. Since we copy extra modules that aren't bundled
+	 * we need to also copy the relevant sourcemaps into the final out directory.
+	 */
+	sourceMap?: CfWorkerSourceMap;
+	/**
 	 * The module type.
 	 *
 	 * If absent, will default to the main module's type.
@@ -67,7 +82,7 @@ export interface CfVars {
  */
 export interface CfKvNamespace {
 	binding: string;
-	id: string;
+	id?: string | typeof INHERIT_SYMBOL;
 }
 
 /**
@@ -84,7 +99,7 @@ export interface CfSendEmailBindings {
  */
 
 export interface CfWasmModuleBindings {
-	[key: string]: string;
+	[key: string]: string | Uint8Array;
 }
 
 /**
@@ -109,6 +124,15 @@ export interface CfBrowserBinding {
 
 export interface CfAIBinding {
 	binding: string;
+	staging?: boolean;
+}
+
+/**
+ * A binding to the Worker Version's metadata
+ */
+
+export interface CfVersionMetadataBinding {
+	binding: string;
 }
 
 /**
@@ -116,7 +140,7 @@ export interface CfAIBinding {
  */
 
 export interface CfDataBlobBindings {
-	[key: string]: string;
+	[key: string]: string | Uint8Array;
 }
 
 /**
@@ -129,21 +153,29 @@ export interface CfDurableObject {
 	environment?: string;
 }
 
+export interface CfWorkflow {
+	name: string;
+	class_name: string;
+	binding: string;
+	script_name?: string;
+}
+
 export interface CfQueue {
 	binding: string;
 	queue_name: string;
+	delivery_delay?: number;
 }
 
 export interface CfR2Bucket {
 	binding: string;
-	bucket_name: string;
+	bucket_name?: string | typeof INHERIT_SYMBOL;
 	jurisdiction?: string;
 }
 
 // TODO: figure out if this is duplicated in packages/wrangler/src/config/environment.ts
 export interface CfD1Database {
 	binding: string;
-	database_id: string;
+	database_id?: string | typeof INHERIT_SYMBOL;
 	database_name?: string;
 	preview_database_id?: string;
 	database_internal_env?: string;
@@ -156,29 +188,25 @@ export interface CfVectorize {
 	index_name: string;
 }
 
-export interface CfConstellation {
-	binding: string;
-	project_id: string;
-}
-
 export interface CfHyperdrive {
 	binding: string;
 	id: string;
 	localConnectionString?: string;
 }
 
-interface CfService {
+export interface CfService {
 	binding: string;
 	service: string;
 	environment?: string;
+	entrypoint?: string;
 }
 
-interface CfAnalyticsEngineDataset {
+export interface CfAnalyticsEngineDataset {
 	binding: string;
 	dataset?: string;
 }
 
-interface CfDispatchNamespace {
+export interface CfDispatchNamespace {
 	binding: string;
 	namespace: string;
 	outbound?: {
@@ -188,21 +216,30 @@ interface CfDispatchNamespace {
 	};
 }
 
-interface CfMTlsCertificate {
+export interface CfMTlsCertificate {
 	binding: string;
 	certificate_id: string;
 }
 
-interface CfLogfwdr {
+export interface CfLogfwdr {
 	bindings: CfLogfwdrBinding[];
 }
 
-interface CfLogfwdrBinding {
+export interface CfLogfwdrBinding {
 	name: string;
 	destination: string;
 }
 
-interface CfUnsafeBinding {
+export interface CfAssetsBinding {
+	binding: string;
+}
+
+export interface CfPipeline {
+	binding: string;
+	pipeline: string;
+}
+
+export interface CfUnsafeBinding {
 	name: string;
 	type: string;
 }
@@ -221,7 +258,7 @@ export type CfCapnp =
 			compiled_schema?: never;
 	  };
 
-interface CfUnsafe {
+export interface CfUnsafe {
 	bindings: CfUnsafeBinding[] | undefined;
 	metadata: CfUnsafeMetadata | undefined;
 	capnp: CfCapnp | undefined;
@@ -232,6 +269,7 @@ export interface CfDurableObjectMigrations {
 	new_tag: string;
 	steps: {
 		new_classes?: string[];
+		new_sqlite_classes?: string[];
 		renamed_classes?: {
 			from: string;
 			to: string;
@@ -242,18 +280,23 @@ export interface CfDurableObjectMigrations {
 
 export interface CfPlacement {
 	mode: "smart";
+	hint?: string;
 }
 
 export interface CfTailConsumer {
 	service: string;
 	environment?: string;
-	namespace?: string;
 }
 
 export interface CfUserLimits {
 	cpu_ms?: number;
 }
 
+export interface CfAssets {
+	jwt: string;
+	routingConfig: RoutingConfig;
+	assetConfig?: AssetConfig;
+}
 /**
  * Options for creating a `CfWorker`.
  */
@@ -271,6 +314,10 @@ export interface CfWorkerInit {
 	 */
 	modules: CfModule[] | undefined;
 	/**
+	 * The list of source maps to include on upload.
+	 */
+	sourceMaps: CfWorkerSourceMap[] | undefined;
+	/**
 	 * All the bindings
 	 */
 	bindings: {
@@ -281,30 +328,45 @@ export interface CfWorkerInit {
 		text_blobs: CfTextBlobBindings | undefined;
 		browser: CfBrowserBinding | undefined;
 		ai: CfAIBinding | undefined;
+		version_metadata: CfVersionMetadataBinding | undefined;
 		data_blobs: CfDataBlobBindings | undefined;
 		durable_objects: { bindings: CfDurableObject[] } | undefined;
+		workflows: CfWorkflow[] | undefined;
 		queues: CfQueue[] | undefined;
 		r2_buckets: CfR2Bucket[] | undefined;
 		d1_databases: CfD1Database[] | undefined;
 		vectorize: CfVectorize[] | undefined;
-		constellation: CfConstellation[] | undefined;
 		hyperdrive: CfHyperdrive[] | undefined;
 		services: CfService[] | undefined;
 		analytics_engine_datasets: CfAnalyticsEngineDataset[] | undefined;
 		dispatch_namespaces: CfDispatchNamespace[] | undefined;
 		mtls_certificates: CfMTlsCertificate[] | undefined;
 		logfwdr: CfLogfwdr | undefined;
+		pipelines: CfPipeline[] | undefined;
 		unsafe: CfUnsafe | undefined;
+		assets: CfAssetsBinding | undefined;
 	};
+	/**
+	 * The raw bindings - this is basically never provided and it'll be the bindings above
+	 * but if we're just taking from the api and re-putting then this is how we can do that
+	 * without going between the different types
+	 */
+	rawBindings?: WorkerMetadataBinding[];
+
 	migrations: CfDurableObjectMigrations | undefined;
 	compatibility_date: string | undefined;
 	compatibility_flags: string[] | undefined;
-	usage_model: "bundled" | "unbound" | undefined;
 	keepVars: boolean | undefined;
+	keepSecrets: boolean | undefined;
+	keepBindings?: WorkerMetadata["keep_bindings"];
 	logpush: boolean | undefined;
 	placement: CfPlacement | undefined;
 	tail_consumers: CfTailConsumer[] | undefined;
 	limits: CfUserLimits | undefined;
+	annotations?: Record<string, string | undefined>;
+	keep_assets?: boolean | undefined;
+	assets: CfAssets | undefined;
+	observability: Observability | undefined;
 }
 
 export interface CfWorkerContext {
@@ -314,4 +376,30 @@ export interface CfWorkerContext {
 	host: string | undefined;
 	routes: Route[] | undefined;
 	sendMetrics: boolean | undefined;
+}
+
+export interface CfWorkerSourceMap {
+	/**
+	 * The name of the source map.
+	 *
+	 * @example
+	 * 'out.js.map'
+	 */
+	name: string;
+	/**
+	 * The content of the source map, which is a JSON object described by the v3
+	 * spec.
+	 *
+	 * @example
+	 * {
+	 *   "version" : 3,
+	 *   "file": "out.js",
+	 *   "sourceRoot": "",
+	 *   "sources": ["foo.js", "bar.js"],
+	 *   "sourcesContent": [null, null],
+	 *   "names": ["src", "maps", "are", "fun"],
+	 *   "mappings": "A,AAAB;;ABCDE;"
+	 * }
+	 */
+	content: string | Buffer;
 }

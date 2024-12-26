@@ -4,12 +4,18 @@ import { Miniflare, MiniflareOptions } from "miniflare";
 import { useTmp, utf8Encode } from "../../test-shared";
 import { binding, getDatabase, opts, test } from "./test";
 
-export const SCHEMA = (tableColours: string, tableKitchenSink: string) => `
+export const SCHEMA = (
+	tableColours: string,
+	tableKitchenSink: string,
+	tablePalettes: string
+) => `
 CREATE TABLE ${tableColours} (id INTEGER PRIMARY KEY, name TEXT NOT NULL, rgb INTEGER NOT NULL);
 CREATE TABLE ${tableKitchenSink} (id INTEGER PRIMARY KEY, int INTEGER, real REAL, text TEXT, blob BLOB);
+CREATE TABLE ${tablePalettes} (id INTEGER PRIMARY KEY, name TEXT NOT NULL, colour_id INTEGER NOT NULL, FOREIGN KEY (colour_id) REFERENCES ${tableColours}(id));
 INSERT INTO ${tableColours} (id, name, rgb) VALUES (1, 'red', 0xff0000);
 INSERT INTO ${tableColours} (id, name, rgb) VALUES (2, 'green', 0x00ff00);
 INSERT INTO ${tableColours} (id, name, rgb) VALUES (3, 'blue', 0x0000ff);
+INSERT INTO ${tablePalettes} (id, name, colour_id) VALUES (1, 'Night', 3);
 `;
 
 export interface ColourRow {
@@ -32,13 +38,18 @@ test.beforeEach(async (t) => {
 	)}`;
 	const tableColours = `colours_${ns}`;
 	const tableKitchenSink = `kitchen_sink_${ns}`;
+	const tablePalettes = `palettes_${ns}`;
 
 	const db = await getDatabase(t.context.mf);
-	await db.exec(SCHEMA(tableColours, tableKitchenSink));
+	const bindings = await t.context.mf.getBindings();
 
+	await db.exec(SCHEMA(tableColours, tableKitchenSink, tablePalettes));
+
+	t.context.bindings = bindings;
 	t.context.db = db;
 	t.context.tableColours = tableColours;
 	t.context.tableKitchenSink = tableKitchenSink;
+	t.context.tablePalettes = tablePalettes;
 });
 
 function throwCause<T>(promise: Promise<T>): Promise<T> {
@@ -154,9 +165,12 @@ test("D1PreparedStatement: bind", async (t) => {
 		)
 		.bind("green")
 		.all<ColourRow>();
+
+	// workerd changed the error message here. Miniflare's tests should pass with either version of workerd
 	await t.throwsAsync(colourResultsPromise, {
 		instanceOf: Error,
-		message: /A prepared SQL statement must contain only one statement/,
+		message:
+			/A prepared SQL statement must contain only one statement|When executing multiple SQL statements in a single call, only the last statement can have parameters./,
 	});
 
 	// Check with numbered parameters (execute and query)
@@ -190,10 +204,23 @@ test("D1PreparedStatement: first", async (t) => {
 			`SELECT * FROM ${tableColours} WHERE name = 'none'; SELECT * FROM ${tableColours} WHERE id = 1;`
 		)
 		.first();
-	await t.throwsAsync(resultPromise, {
-		instanceOf: Error,
-		message: /A prepared SQL statement must contain only one statement/,
-	});
+
+	// workerd changed its behaviour from throwing to returning the last result. Miniflare's tests should pass with either version of workerd
+	try {
+		const d1Result = await resultPromise;
+		t.deepEqual(d1Result, {
+			id: 1,
+			name: "red",
+			rgb: 16711680,
+		});
+	} catch (e) {
+		t.truthy(e instanceof Error);
+		t.assert(
+			/A prepared SQL statement must contain only one statement/.test(
+				(e as Error).message
+			)
+		);
+	}
 
 	// Check with write statement (should actually execute statement)
 	result = await db
@@ -229,6 +256,8 @@ test("D1PreparedStatement: run", async (t) => {
 			last_row_id: result.meta.last_row_id,
 			served_by: "miniflare.db",
 			size_after: result.meta.size_after,
+			rows_read: 3,
+			rows_written: 0,
 		},
 	});
 
@@ -251,6 +280,8 @@ test("D1PreparedStatement: run", async (t) => {
 			last_row_id: 4,
 			served_by: "miniflare.db",
 			size_after: result.meta.size_after,
+			rows_read: 2,
+			rows_written: 1,
 		},
 	});
 
@@ -260,10 +291,33 @@ test("D1PreparedStatement: run", async (t) => {
 			`INSERT INTO ${tableKitchenSink} (id) VALUES (1); INSERT INTO ${tableKitchenSink} (id) VALUES (2);`
 		)
 		.run();
-	await t.throwsAsync(resultPromise, {
-		instanceOf: Error,
-		message: /A prepared SQL statement must contain only one statement/,
-	});
+
+	// workerd changed its behaviour from throwing to returning the last result. Miniflare's tests should pass with either version of workerd
+	try {
+		result = await resultPromise;
+		t.deepEqual(result, {
+			meta: {
+				changed_db: true,
+				changes: 2,
+				// Don't know duration, so just match on returned value asserted > 0
+				duration: result.meta.duration,
+				last_row_id: result.meta.last_row_id,
+				rows_read: 1,
+				rows_written: 1,
+				served_by: "miniflare.db",
+				size_after: result.meta.size_after,
+			},
+			results: [],
+			success: true,
+		});
+	} catch (e) {
+		t.truthy(e instanceof Error);
+		t.assert(
+			/A prepared SQL statement must contain only one statement/.test(
+				(e as Error).message
+			)
+		);
+	}
 
 	// Check with write statement
 	result = await db
@@ -282,6 +336,8 @@ test("D1PreparedStatement: run", async (t) => {
 			last_row_id: 5,
 			served_by: "miniflare.db",
 			size_after: result.meta.size_after,
+			rows_read: 1,
+			rows_written: 1,
 		},
 	});
 });
@@ -309,6 +365,8 @@ test("D1PreparedStatement: all", async (t) => {
 			last_row_id: result.meta.last_row_id,
 			served_by: "miniflare.db",
 			size_after: result.meta.size_after,
+			rows_read: 3,
+			rows_written: 0,
 		},
 	});
 
@@ -318,10 +376,39 @@ test("D1PreparedStatement: all", async (t) => {
 			`SELECT * FROM ${tableColours} WHERE id = 1; SELECT * FROM ${tableColours} WHERE id = 3;`
 		)
 		.all<ColourRow>();
-	await t.throwsAsync(resultPromise, {
-		instanceOf: Error,
-		message: /A prepared SQL statement must contain only one statement/,
-	});
+
+	// workerd changed its behaviour from throwing to returning the last result. Miniflare's tests should pass with either version of workerd
+	try {
+		result = await resultPromise;
+		t.deepEqual(result, {
+			meta: {
+				changed_db: false,
+				changes: 0,
+				// Don't know duration, so just match on returned value asserted > 0
+				duration: result.meta.duration,
+				last_row_id: result.meta.last_row_id,
+				rows_read: 1,
+				rows_written: 0,
+				served_by: "miniflare.db",
+				size_after: result.meta.size_after,
+			},
+			results: [
+				{
+					id: 3,
+					name: "blue",
+					rgb: 255,
+				},
+			],
+			success: true,
+		});
+	} catch (e) {
+		t.truthy(e instanceof Error);
+		t.assert(
+			/A prepared SQL statement must contain only one statement/.test(
+				(e as Error).message
+			)
+		);
+	}
 
 	// Check with write statement (should actually execute, but return nothing)
 	result = await db
@@ -368,10 +455,19 @@ test("D1PreparedStatement: raw", async (t) => {
 			`SELECT * FROM ${tableColours} WHERE id = 1; SELECT * FROM ${tableColours} WHERE id = 3;`
 		)
 		.raw<RawColourRow>();
-	await t.throwsAsync(resultPromise, {
-		instanceOf: Error,
-		message: /A prepared SQL statement must contain only one statement/,
-	});
+
+	// workerd changed its behaviour from throwing to returning the last result. Miniflare's tests should pass with either version of workerd
+	try {
+		const result = await resultPromise;
+		t.deepEqual(result, [[3, "blue", 0x0000ff]]);
+	} catch (e) {
+		t.truthy(e instanceof Error);
+		t.assert(
+			/A prepared SQL statement must contain only one statement/.test(
+				(e as Error).message
+			)
+		);
+	}
 
 	// Check with write statement (should actually execute, but return nothing)
 	results = await db
@@ -384,10 +480,29 @@ test("D1PreparedStatement: raw", async (t) => {
 		.bind("yellow")
 		.first("id");
 	t.is(id, 4);
+
+	// Check whether workerd raw test case passes here too
+	// Note that this test did not pass with the old binding
+	if (!t.context.bindings["__D1_BETA__DB"]) {
+		await db.prepare(`CREATE TABLE abc (a INT, b INT, c INT);`).run();
+		await db.prepare(`CREATE TABLE cde (c INT, d INT, e INT);`).run();
+		await db.prepare(`INSERT INTO abc VALUES (1,2,3),(4,5,6);`).run();
+		await db.prepare(`INSERT INTO cde VALUES (7,8,9),(1,2,3);`).run();
+		const rawPromise = await db
+			.prepare(`SELECT * FROM abc, cde;`)
+			.raw({ columnNames: true });
+		t.deepEqual(rawPromise, [
+			["a", "b", "c", "c", "d", "e"],
+			[1, 2, 3, 7, 8, 9],
+			[1, 2, 3, 1, 2, 3],
+			[4, 5, 6, 7, 8, 9],
+			[4, 5, 6, 1, 2, 3],
+		]);
+	}
 });
 
 test("operations persist D1 data", async (t) => {
-	const { tableColours, tableKitchenSink } = t.context;
+	const { tableColours, tableKitchenSink, tablePalettes } = t.context;
 
 	// Create new temporary file-system persistence directory
 	const tmp = await useTmp(t);
@@ -397,7 +512,7 @@ test("operations persist D1 data", async (t) => {
 	let db = await getDatabase(mf);
 
 	// Check execute respects persist
-	await db.exec(SCHEMA(tableColours, tableKitchenSink));
+	await db.exec(SCHEMA(tableColours, tableKitchenSink, tablePalettes));
 	await db
 		.prepare(
 			`INSERT INTO ${tableColours} (id, name, rgb) VALUES (4, 'purple', 0xff00ff);`
@@ -423,7 +538,7 @@ test("operations persist D1 data", async (t) => {
 });
 
 test.serial("operations permit strange database names", async (t) => {
-	const { tableColours, tableKitchenSink } = t.context;
+	const { tableColours, tableKitchenSink, tablePalettes } = t.context;
 
 	// Set option, then reset after test
 	const id = "my/ Database";
@@ -433,7 +548,7 @@ test.serial("operations permit strange database names", async (t) => {
 
 	// Check basic operations work
 
-	await db.exec(SCHEMA(tableColours, tableKitchenSink));
+	await db.exec(SCHEMA(tableColours, tableKitchenSink, tablePalettes));
 
 	await db
 		.prepare(
@@ -444,4 +559,24 @@ test.serial("operations permit strange database names", async (t) => {
 		.prepare(`SELECT name FROM ${tableColours} WHERE id = 4`)
 		.first<Pick<ColourRow, "name">>();
 	t.deepEqual(result, { name: "pink" });
+});
+
+test("it properly handles ROWS_AND_COLUMNS results format", async (t) => {
+	const { tableColours, tablePalettes } = t.context;
+	const db = await getDatabase(t.context.mf);
+
+	const results = await db
+		.prepare(
+			`SELECT ${tableColours}.name, ${tablePalettes}.name FROM ${tableColours} JOIN ${tablePalettes} ON ${tableColours}.id = ${tablePalettes}.colour_id`
+		)
+		.raw();
+
+	let expectedResults;
+	// Note that this test did not pass with the old binding
+	if (!t.context.bindings["__D1_BETA__DB"]) {
+		expectedResults = [["blue", "Night"]];
+	} else {
+		expectedResults = [["Night"]];
+	}
+	t.deepEqual(results, expectedResults);
 });

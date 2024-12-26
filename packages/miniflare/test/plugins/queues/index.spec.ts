@@ -3,6 +3,7 @@ import {
 	DeferredPromise,
 	LogLevel,
 	Miniflare,
+	MiniflareCoreError,
 	QUEUES_PLUGIN_NAME,
 	QueuesError,
 	Response,
@@ -16,7 +17,12 @@ import {
 
 const StringArraySchema = z.string().array();
 const MessageArraySchema = z
-	.object({ queue: z.string(), id: z.string(), body: z.string() })
+	.object({
+		queue: z.string(),
+		id: z.string(),
+		body: z.string(),
+		attempts: z.number(),
+	})
 	.array();
 
 async function getControlStub(
@@ -34,6 +40,34 @@ async function getControlStub(
 	await stub.enableFakeTimers(1_000_000);
 	return stub;
 }
+
+test("maxBatchTimeout validation", async (t) => {
+	const mf = new Miniflare({
+		verbose: true,
+		queueConsumers: {
+			QUEUE: { maxBatchTimeout: 60 },
+		},
+		modules: true,
+		script: "",
+	});
+	t.throws(
+		() =>
+			new Miniflare({
+				verbose: true,
+				queueConsumers: {
+					QUEUE: { maxBatchTimeout: 61 },
+				},
+				modules: true,
+				script: "",
+			}),
+		{
+			instanceOf: MiniflareCoreError,
+			code: "ERR_VALIDATION",
+			message: /Number must be less than or equal to 60/,
+		}
+	);
+	t.teardown(() => mf.dispose());
+});
 
 test("flushes partial and full batches", async (t) => {
 	let batches: string[][] = [];
@@ -173,6 +207,126 @@ test("flushes partial and full batches", async (t) => {
 	batches = [];
 });
 
+test("supports declaring queue producers as a key-value pair -> queueProducers: { 'MY_QUEUE_BINDING': 'my-queue_name' }", async (t) => {
+	const promise = new DeferredPromise<z.infer<typeof MessageArraySchema>>();
+	const mf = new Miniflare({
+		verbose: true,
+		queueProducers: { MY_QUEUE_PRODUCER: "MY_QUEUE" },
+		queueConsumers: ["MY_QUEUE"],
+		serviceBindings: {
+			async REPORTER(request) {
+				promise.resolve(MessageArraySchema.parse(await request.json()));
+				return new Response();
+			},
+		},
+		modules: true,
+		script: `export default {
+      async fetch(request, env, ctx) {
+				await env.MY_QUEUE_PRODUCER.send("Hello world!");
+				await env.MY_QUEUE_PRODUCER.sendBatch([{ body: "Hola mundo!" }]);
+        return new Response(null, { status: 204 });
+      },
+      async queue(batch, env, ctx) {
+        await env.REPORTER.fetch("http://localhost", {
+          method: "POST",
+          body: JSON.stringify(batch.messages.map(({ id, body, attempts }) => ({ queue: batch.queue, id, body, attempts }))),
+        });
+      }
+    }`,
+	});
+	t.teardown(() => mf.dispose());
+	const object = await getControlStub(mf, "MY_QUEUE");
+
+	await mf.dispatchFetch("http://localhost");
+	await object.advanceFakeTime(1000);
+	await object.waitForFakeTasks();
+	const batch = await promise;
+	t.deepEqual(batch, [
+		{ queue: "MY_QUEUE", id: batch[0].id, body: "Hello world!", attempts: 1 },
+		{ queue: "MY_QUEUE", id: batch[1].id, body: "Hola mundo!", attempts: 1 },
+	]);
+});
+
+test("supports declaring queue producers as an array -> queueProducers: ['MY_QUEUE_BINDING']", async (t) => {
+	const promise = new DeferredPromise<z.infer<typeof MessageArraySchema>>();
+	const mf = new Miniflare({
+		verbose: true,
+		queueProducers: ["MY_QUEUE"],
+		queueConsumers: ["MY_QUEUE"],
+		serviceBindings: {
+			async REPORTER(request) {
+				promise.resolve(MessageArraySchema.parse(await request.json()));
+				return new Response();
+			},
+		},
+		modules: true,
+		script: `export default {
+      async fetch(request, env, ctx) {
+        await env.MY_QUEUE.send("Hello World!");
+				await env.MY_QUEUE.sendBatch([{ body: "Hola Mundo!" }]);
+        return new Response(null, { status: 204 });
+      },
+      async queue(batch, env, ctx) {
+        await env.REPORTER.fetch("http://localhost", {
+          method: "POST",
+          body: JSON.stringify(batch.messages.map(({ id, body, attempts }) => ({ queue: batch.queue, id, body, attempts }))),
+        });
+      }
+    }`,
+	});
+	t.teardown(() => mf.dispose());
+	const object = await getControlStub(mf, "MY_QUEUE");
+
+	await mf.dispatchFetch("http://localhost");
+	await object.advanceFakeTime(1000);
+	await object.waitForFakeTasks();
+	const batch = await promise;
+	t.deepEqual(batch, [
+		{ queue: "MY_QUEUE", id: batch[0].id, body: "Hello World!", attempts: 1 },
+		{ queue: "MY_QUEUE", id: batch[1].id, body: "Hola Mundo!", attempts: 1 },
+	]);
+});
+
+test("supports declaring queue producers as {MY_QUEUE_BINDING: {queueName: 'my-queue-name'}}", async (t) => {
+	const promise = new DeferredPromise<z.infer<typeof MessageArraySchema>>();
+	const mf = new Miniflare({
+		verbose: true,
+		queueProducers: { MY_QUEUE_PRODUCER: { queueName: "MY_QUEUE" } },
+		queueConsumers: ["MY_QUEUE"],
+		serviceBindings: {
+			async REPORTER(request) {
+				promise.resolve(MessageArraySchema.parse(await request.json()));
+				return new Response();
+			},
+		},
+		modules: true,
+		script: `export default {
+      async fetch(request, env, ctx) {
+        await env.MY_QUEUE_PRODUCER.send("Hello World!");
+				await env.MY_QUEUE_PRODUCER.sendBatch([{ body: "Hola Mundo!" }]);
+        return new Response(null, { status: 204 });
+      },
+      async queue(batch, env, ctx) {
+        await env.REPORTER.fetch("http://localhost", {
+          method: "POST",
+          body: JSON.stringify(batch.messages.map(({ id, body, attempts }) => ({ queue: batch.queue, id, body, attempts }))),
+        });
+      }
+    }`,
+	});
+	t.teardown(() => mf.dispose());
+	const object = await getControlStub(mf, "MY_QUEUE");
+
+	await mf.dispatchFetch("http://localhost");
+	await object.advanceFakeTime(1000);
+	await object.waitForFakeTasks();
+	const batch = await promise;
+	t.deepEqual(batch, [
+		{ queue: "MY_QUEUE", id: batch[0].id, body: "Hello World!", attempts: 1 },
+		{ queue: "MY_QUEUE", id: batch[1].id, body: "Hola Mundo!", attempts: 1 },
+	]);
+});
+
 test("sends all structured cloneable types", async (t) => {
 	const errorPromise = new DeferredPromise<string>();
 
@@ -181,7 +335,7 @@ test("sends all structured cloneable types", async (t) => {
 
 		queueProducers: ["QUEUE"],
 		queueConsumers: {
-			QUEUE: { maxBatchSize: 100, maxBatchTimeout: 0, maxRetires: 0 },
+			QUEUE: { maxBatchSize: 100, maxBatchTimeout: 0, maxRetries: 0 },
 		},
 		serviceBindings: {
 			async REPORTER(request) {
@@ -200,11 +354,11 @@ test("sends all structured cloneable types", async (t) => {
 				path: "<script>",
 				contents: `
         import assert from "node:assert";
-        
+
         const arrayBuffer = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7]).buffer;
         const cyclic = { a: 1 };
         cyclic.b = cyclic;
-        
+
         const VALUES = {
           Object: { w: 1, x: 42n, y: true, z: "string" },
           Cyclic: cyclic,
@@ -242,7 +396,7 @@ test("sends all structured cloneable types", async (t) => {
             assert.deepStrictEqual(value.cause, VALUES.Error.cause, "Error: cause");
           }
         };
-        
+
         export default {
           async fetch(request, env, ctx) {
             await env.QUEUE.sendBatch(Object.entries(VALUES).map(
@@ -294,7 +448,10 @@ function stripTimings(entries: LogEntry[]) {
 
 test("retries messages", async (t) => {
 	let batches: z.infer<typeof MessageArraySchema>[] = [];
-	const bodies = () => batches.map((batch) => batch.map(({ body }) => body));
+	const bodiesAttempts = () =>
+		batches.map((batch) =>
+			batch.map(({ body, attempts }) => ({ body, attempts }))
+		);
 
 	let retryAll = false;
 	let errorAll = false;
@@ -303,10 +460,9 @@ test("retries messages", async (t) => {
 	const log = new TestLog(t);
 	const mf = new Miniflare({
 		log,
-
-		queueProducers: { QUEUE: "queue" },
+		queueProducers: { QUEUE: { queueName: "queue" } },
 		queueConsumers: {
-			queue: { maxBatchSize: 5, maxBatchTimeout: 1, maxRetires: 2 },
+			queue: { maxBatchSize: 5, maxBatchTimeout: 1, maxRetries: 2 },
 		},
 		serviceBindings: {
 			async RETRY_FILTER(request) {
@@ -326,7 +482,7 @@ test("retries messages", async (t) => {
       async queue(batch, env, ctx) {
         const res = await env.RETRY_FILTER.fetch("http://localhost", {
           method: "POST",
-          body: JSON.stringify(batch.messages.map(({ id, body }) => ({ queue: batch.queue, id, body }))),
+          body: JSON.stringify(batch.messages.map(({ id, body, attempts }) => ({ queue: batch.queue, id, body, attempts }))),
         });
         const { retryAll, errorAll, retryMessages } = await res.json();
         if (retryAll) {
@@ -379,7 +535,14 @@ test("retries messages", async (t) => {
 	await object.advanceFakeTime(1000);
 	await object.waitForFakeTasks();
 	t.is(batches.length, 2);
-	t.deepEqual(bodies(), [["msg1", "msg2", "msg3"], ["msg2"]]);
+	t.deepEqual(bodiesAttempts(), [
+		[
+			{ body: "msg1", attempts: 1 },
+			{ body: "msg2", attempts: 1 },
+			{ body: "msg3", attempts: 1 },
+		],
+		[{ body: "msg2", attempts: 2 }],
+	]);
 	batches = [];
 
 	// Check with explicit retry all
@@ -412,9 +575,17 @@ test("retries messages", async (t) => {
 	t.deepEqual(stripTimings(log.logs), [
 		[LogLevel.INFO, "QUEUE queue 3/3 (Xms)"],
 	]);
-	t.deepEqual(bodies(), [
-		["msg1", "msg2", "msg3"],
-		["msg1", "msg2", "msg3"],
+	t.deepEqual(bodiesAttempts(), [
+		[
+			{ body: "msg1", attempts: 1 },
+			{ body: "msg2", attempts: 1 },
+			{ body: "msg3", attempts: 1 },
+		],
+		[
+			{ body: "msg1", attempts: 2 },
+			{ body: "msg2", attempts: 2 },
+			{ body: "msg3", attempts: 2 },
+		],
 	]);
 	batches = [];
 
@@ -448,9 +619,17 @@ test("retries messages", async (t) => {
 	t.deepEqual(stripTimings(log.logs), [
 		[LogLevel.INFO, "QUEUE queue 3/3 (Xms)"],
 	]);
-	t.deepEqual(bodies(), [
-		["msg1", "msg2", "msg3"],
-		["msg1", "msg2", "msg3"],
+	t.deepEqual(bodiesAttempts(), [
+		[
+			{ body: "msg1", attempts: 1 },
+			{ body: "msg2", attempts: 1 },
+			{ body: "msg3", attempts: 1 },
+		],
+		[
+			{ body: "msg1", attempts: 2 },
+			{ body: "msg2", attempts: 2 },
+			{ body: "msg3", attempts: 2 },
+		],
 	]);
 	batches = [];
 
@@ -504,10 +683,18 @@ test("retries messages", async (t) => {
 	await object.advanceFakeTime(1000);
 	await object.waitForFakeTasks();
 	t.is(batches.length, 3);
-	t.deepEqual(bodies(), [
-		["msg1", "msg2", "msg3"],
-		["msg1", "msg2", "msg3"],
-		["msg3"],
+	t.deepEqual(bodiesAttempts(), [
+		[
+			{ body: "msg1", attempts: 1 },
+			{ body: "msg2", attempts: 1 },
+			{ body: "msg3", attempts: 1 },
+		],
+		[
+			{ body: "msg1", attempts: 2 },
+			{ body: "msg2", attempts: 2 },
+			{ body: "msg3", attempts: 2 },
+		],
+		[{ body: "msg3", attempts: 3 }],
 	]);
 	batches = [];
 });
@@ -521,19 +708,19 @@ test("moves to dead letter queue", async (t) => {
 		log,
 		verbose: true,
 
-		queueProducers: { BAD_QUEUE: "bad" },
+		queueProducers: { BAD_QUEUE: { queueName: "bad" } },
 		queueConsumers: {
 			// Check single Worker consuming multiple queues
 			bad: {
 				maxBatchSize: 5,
 				maxBatchTimeout: 1,
-				maxRetires: 0,
+				maxRetries: 0,
 				deadLetterQueue: "dlq",
 			},
 			dlq: {
 				maxBatchSize: 5,
 				maxBatchTimeout: 1,
-				maxRetires: 0,
+				maxRetries: 0,
 				deadLetterQueue: "bad", // (cyclic)
 			},
 		},
@@ -555,7 +742,7 @@ test("moves to dead letter queue", async (t) => {
       async queue(batch, env, ctx) {
         const res = await env.RETRY_FILTER.fetch("http://localhost", {
           method: "POST",
-          body: JSON.stringify(batch.messages.map(({ id, body }) => ({ queue: batch.queue, id, body }))),
+          body: JSON.stringify(batch.messages.map(({ id, body, attempts }) => ({ queue: batch.queue, id, body, attempts }))),
         });
         const { retryMessages } = await res.json();
         for (const message of batch.messages) {
@@ -616,15 +803,15 @@ test("moves to dead letter queue", async (t) => {
 	log.logs = [];
 	t.deepEqual(batches, [
 		[
-			{ queue: "bad", id: batches[0][0].id, body: "msg1" },
-			{ queue: "bad", id: batches[0][1].id, body: "msg2" },
-			{ queue: "bad", id: batches[0][2].id, body: "msg3" },
+			{ queue: "bad", id: batches[0][0].id, body: "msg1", attempts: 1 },
+			{ queue: "bad", id: batches[0][1].id, body: "msg2", attempts: 1 },
+			{ queue: "bad", id: batches[0][2].id, body: "msg3", attempts: 1 },
 		],
 		[
-			{ queue: "dlq", id: batches[0][1].id, body: "msg2" },
-			{ queue: "dlq", id: batches[0][2].id, body: "msg3" },
+			{ queue: "dlq", id: batches[0][1].id, body: "msg2", attempts: 1 },
+			{ queue: "dlq", id: batches[0][2].id, body: "msg3", attempts: 1 },
 		],
-		[{ queue: "bad", id: batches[0][1].id, body: "msg2" }],
+		[{ queue: "bad", id: batches[0][1].id, body: "msg2", attempts: 1 }],
 	]);
 
 	// Check rejects queue as own dead letter queue
@@ -645,7 +832,7 @@ test("operations permit strange queue names", async (t) => {
 	const id = "my/ Queue";
 	const mf = new Miniflare({
 		verbose: true,
-		queueProducers: { QUEUE: id },
+		queueProducers: { QUEUE: { queueName: id } },
 		queueConsumers: [id],
 		serviceBindings: {
 			async REPORTER(request) {
@@ -663,7 +850,7 @@ test("operations permit strange queue names", async (t) => {
       async queue(batch, env, ctx) {
         await env.REPORTER.fetch("http://localhost", {
           method: "POST",
-          body: JSON.stringify(batch.messages.map(({ id, body }) => ({ queue: batch.queue, id, body }))),
+          body: JSON.stringify(batch.messages.map(({ id, body, attempts }) => ({ queue: batch.queue, id, body, attempts }))),
         });
       }
     }`,
@@ -676,8 +863,8 @@ test("operations permit strange queue names", async (t) => {
 	await object.waitForFakeTasks();
 	const batch = await promise;
 	t.deepEqual(batch, [
-		{ queue: id, id: batch[0].id, body: "msg1" },
-		{ queue: id, id: batch[1].id, body: "msg2" },
+		{ queue: id, id: batch[0].id, body: "msg1", attempts: 1 },
+		{ queue: id, id: batch[1].id, body: "msg2", attempts: 1 },
 	]);
 });
 
@@ -693,7 +880,7 @@ test("supports message contentTypes", async (t) => {
 	const mf = new Miniflare({
 		log,
 		verbose: true,
-		queueProducers: { QUEUE: id },
+		queueProducers: { QUEUE: { queueName: id } },
 		queueConsumers: [id],
 		serviceBindings: {
 			async REPORTER(request) {
@@ -766,7 +953,13 @@ test("supports message contentTypes", async (t) => {
 test("validates message size", async (t) => {
 	const mf = new Miniflare({
 		verbose: true,
-		queueProducers: ["QUEUE"],
+		queueProducers: { QUEUE: "MY_QUEUE" },
+		queueConsumers: {
+			MY_QUEUE: {
+				maxBatchSize: 100,
+				maxBatchTimeout: 0,
+			},
+		},
 		modules: true,
 		script: `export default {
       async fetch(request, env, ctx) {

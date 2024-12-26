@@ -1,22 +1,14 @@
 import { writeFileSync } from "node:fs";
+import { vi } from "vitest";
+import { getPackageManager, getPackageManagerName } from "../package-manager";
 import { mockBinary } from "./helpers/mock-bin";
 import { mockConsoleMethods } from "./helpers/mock-console";
 import { runInTempDir } from "./helpers/run-in-tmp";
 
-const { getPackageManager, getPackageManagerName } =
-	jest.requireActual("../package-manager");
-
+vi.unmock("../package-manager");
 function mockUserAgent(userAgent = "npm") {
-	let original: string | undefined;
 	beforeEach(() => {
-		// eslint-disable-next-line turbo/no-undeclared-env-vars
-		original = process.env.npm_config_user_agent;
-		// eslint-disable-next-line turbo/no-undeclared-env-vars
-		process.env.npm_config_user_agent = userAgent;
-	});
-	afterEach(() => {
-		// eslint-disable-next-line turbo/no-undeclared-env-vars
-		process.env.npm_config_user_agent = original;
+		vi.stubEnv("npm_config_user_agent", userAgent);
 	});
 }
 interface TestCase {
@@ -243,7 +235,7 @@ describe("getPackageManager()", () => {
 			await expect(() =>
 				getPackageManager(process.cwd())
 			).rejects.toThrowErrorMatchingInlineSnapshot(
-				`"Unable to find a package manager. Supported managers are: npm, yarn, and pnpm."`
+				`[Error: Unable to find a package manager. Supported managers are: npm, yarn, and pnpm.]`
 			);
 		});
 	});

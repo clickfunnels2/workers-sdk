@@ -19,6 +19,7 @@ export interface Config {
 	sockets?: Socket[];
 	v8Flags?: string[];
 	extensions?: Extension[];
+	autogates?: string[];
 }
 
 export type Socket = {
@@ -59,6 +60,7 @@ export type Worker = (
 	durableObjectNamespaces?: Worker_DurableObjectNamespace[];
 	durableObjectUniqueKeyModifier?: string;
 	durableObjectStorage?: Worker_DurableObjectStorage;
+	moduleFallback?: string;
 };
 
 export type Worker_DurableObjectStorage =
@@ -76,6 +78,8 @@ export type Worker_Module = {
 	| { wasm?: Uint8Array }
 	| { json?: string }
 	| { nodeJsCompatModule?: string }
+	| { pythonModule?: string }
+	| { pythonRequirement?: string }
 );
 
 export type Worker_Binding = {
@@ -156,9 +160,21 @@ export interface Worker_Binding_Hyperdrive {
 	scheme?: string;
 }
 
+export interface Worker_Binding_MemoryCache {
+	id?: string;
+	limits?: Worker_Binding_MemoryCacheLimits;
+}
+
+export interface Worker_Binding_MemoryCacheLimits {
+	maxKeys?: number;
+	maxValueSize?: number;
+	maxTotalValueSize?: number;
+}
+
 export type Worker_DurableObjectNamespace = {
 	className?: string;
 	preventEviction?: boolean;
+	enableSql?: boolean;
 } & ({ uniqueKey?: string } | { ephemeralLocal?: Void });
 
 export type ExternalServer = { address?: string } & (
@@ -195,6 +211,7 @@ export interface HttpOptions {
 	cfBlobHeader?: string;
 	injectRequestHeaders?: HttpOptions_Header[];
 	injectResponseHeaders?: HttpOptions_Header[];
+	capnpConnectHost?: string;
 }
 
 export interface HttpOptions_Header {

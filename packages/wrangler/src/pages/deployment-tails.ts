@@ -9,9 +9,9 @@ import isInteractive from "../is-interactive";
 import { logger } from "../logger";
 import * as metrics from "../metrics";
 import {
+	createPagesTail,
 	jsonPrintLogs,
 	prettyPrintLogs,
-	createPagesTail,
 } from "../tail/createTail";
 import { translateCLICommandToFilterMessage } from "../tail/filters";
 import { requireAuth } from "../user";
@@ -22,10 +22,11 @@ import type {
 	CommonYargsArgv,
 	StrictYargsOptionsToInterface,
 } from "../yargs-types";
-import type { Deployment, PagesConfigCache } from "./types";
+import type { PagesConfigCache } from "./types";
+import type { Deployment } from "@cloudflare/types";
 
 const statusChoices = ["ok", "error", "canceled"] as const;
-type StatusChoice = typeof statusChoices[number];
+type StatusChoice = (typeof statusChoices)[number];
 const isStatusChoiceList = (
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	data?: any[]
@@ -130,7 +131,7 @@ export async function Handler({
 		await printWranglerBanner();
 	}
 
-	const config = readConfig(args.config, args);
+	const config = readConfig(args);
 	const pagesConfig = getConfigCache<PagesConfigCache>(
 		PAGES_CONFIG_CACHE_FILENAME
 	);
@@ -162,7 +163,9 @@ export async function Handler({
 	}
 
 	const deployments: Array<Deployment> = await fetchResult(
-		`/accounts/${accountId}/pages/projects/${projectName}/deployments`
+		`/accounts/${accountId}/pages/projects/${projectName}/deployments`,
+		{},
+		new URLSearchParams({ env: environment })
 	);
 
 	const envDeployments = deployments.filter(
@@ -205,7 +208,7 @@ export async function Handler({
 	}
 
 	if (!deploymentId || !projectName) {
-		throw new FatalError("An unknown error occurred.", 1);
+		throw new Error("An unknown error occurred.");
 	}
 
 	const filters = translateCLICommandToFilterMessage({
@@ -217,7 +220,7 @@ export async function Handler({
 		status,
 	});
 
-	await metrics.sendMetricsEvent("begin pages log stream", {
+	metrics.sendMetricsEvent("begin pages log stream", {
 		sendMetrics: config.send_metrics,
 	});
 
@@ -233,11 +236,13 @@ export async function Handler({
 		let didTerminate = false;
 
 		return async () => {
-			if (didTerminate) return;
+			if (didTerminate) {
+				return;
+			}
 
 			tail.terminate();
 			await deleteTail();
-			await metrics.sendMetricsEvent("end pages log stream", {
+			metrics.sendMetricsEvent("end pages log stream", {
 				sendMetrics: config.send_metrics,
 			});
 
@@ -266,7 +271,7 @@ export async function Handler({
 				await setTimeout(100);
 				break;
 			case tail.CLOSED:
-				await metrics.sendMetricsEvent("end log stream", {
+				metrics.sendMetricsEvent("end log stream", {
 					sendMetrics: config.send_metrics,
 				});
 				throw new Error(

@@ -1,12 +1,13 @@
 import assert from "assert";
 import { Blob } from "buffer";
+import http from "http";
 import { text } from "stream/consumers";
-import { ReadableStream } from "stream/web";
+import { ReadableStream, WritableStream } from "stream/web";
 import util from "util";
-import type { Fetcher } from "@cloudflare/workers-types/experimental";
 import test, { ThrowsExpectation } from "ava";
 import {
 	DeferredPromise,
+	fetch,
 	File,
 	MessageEvent,
 	Miniflare,
@@ -14,6 +15,7 @@ import {
 	Response,
 	WebSocketPair,
 } from "miniflare";
+import type { Fetcher } from "@cloudflare/workers-types/experimental";
 
 // This file tests API proxy edge cases. Cache, D1, Durable Object and R2 tests
 // make extensive use of the API proxy, testing their specific special cases.
@@ -54,11 +56,38 @@ test("ProxyClient: supports service bindings with WebSockets", async (t) => {
 });
 
 test("ProxyClient: supports serialising multiple ReadableStreams, Blobs and Files", async (t) => {
-	const mf = new Miniflare({ script: nullScript });
+	// For testing proxy client serialisation, add an API that just returns its
+	// arguments. Note without the `.pipeThrough(new TransformStream())` below,
+	// we'll see `TypeError: Inter-TransformStream ReadableStream.pipeTo() is
+	// not implemented.`. `IdentityTransformStream` doesn't work here.
+	const mf = new Miniflare({
+		workers: [
+			{
+				name: "entry",
+				modules: true,
+				script: "",
+				wrappedBindings: { IDENTITY: "identity" },
+			},
+			{
+				name: "identity",
+				modules: true,
+				script: `
+				class Identity {
+					async asyncIdentity(...args) {
+						const i = args.findIndex((arg) => arg instanceof ReadableStream);
+						if (i !== -1) args[i] = args[i].pipeThrough(new TransformStream());
+						return args;
+					}
+				}
+				export default function() { return new Identity(); }
+				`,
+			},
+		],
+	});
 	t.teardown(() => mf.dispose());
 
 	const client = await mf._getProxyClient();
-	const IDENTITY = client.env.IDENTITY as {
+	const IDENTITY = client.env["MINIFLARE_PROXY:core:entry:IDENTITY"] as {
 		asyncIdentity<Args extends any[]>(...args: Args): Promise<Args>;
 	};
 
@@ -157,7 +186,7 @@ test("ProxyClient: stack traces don't include internal implementation", async (t
 
 	const mf = new Miniflare({
 		modules: true,
-		script: `export class DurableObject {}    
+		script: `export class DurableObject {}
     export default {
       fetch() { return new Response(null, { status: 404 }); }
     }`,
@@ -215,6 +244,55 @@ test("ProxyClient: returns empty ReadableStream synchronously", async (t) => {
 	assert(objectBody != null);
 	t.is(await text(objectBody.body), ""); // Synchronous empty stream access
 });
+test("ProxyClient: returns multiple ReadableStreams in parallel", async (t) => {
+	const mf = new Miniflare({ script: nullScript, r2Buckets: ["BUCKET"] });
+	t.teardown(() => mf.dispose());
+
+	const logs: string[] = [];
+
+	const bucket = await mf.getR2Bucket("BUCKET");
+
+	const str = new Array(500000)
+		.fill(null)
+		.map(() => "test")
+		.join("");
+
+	const objectKeys = ["obj-1", "obj-2", "obj-3"];
+
+	for (const objectKey of objectKeys) {
+		await bucket.put(objectKey, str);
+	}
+
+	await Promise.all(
+		objectKeys.map((objectKey) =>
+			bucket.get(objectKey).then((obj) => readStream(objectKey, obj?.body))
+		)
+	);
+
+	async function readStream(objectKey: string, stream?: ReadableStream) {
+		logs.push(`[${objectKey}] stream start`);
+		if (!stream) return;
+		await stream.pipeTo(
+			new WritableStream({
+				write(_chunk) {
+					logs.push(`[${objectKey}] stream chunk`);
+				},
+				close() {
+					logs.push(`[${objectKey}] stream close`);
+				},
+			})
+		);
+		logs.push(`[${objectKey}] stream end`);
+	}
+
+	for (const objectKey of objectKeys) {
+		t.is(logs.includes(`[${objectKey}] stream start`), true);
+		t.is(logs.includes(`[${objectKey}] stream chunk`), true);
+		t.is(logs.includes(`[${objectKey}] stream close`), true);
+		t.is(logs.includes(`[${objectKey}] stream end`), true);
+	}
+});
+
 test("ProxyClient: can `JSON.stringify()` proxies", async (t) => {
 	const mf = new Miniflare({ script: nullScript, r2Buckets: ["BUCKET"] });
 	t.teardown(() => mf.dispose());
@@ -235,6 +313,40 @@ test("ProxyClient: can `JSON.stringify()` proxies", async (t) => {
 		key: "key",
 		size: 5,
 		uploaded: object.uploaded.toISOString(),
+		storageClass: "",
 		version: object.version,
 	});
+});
+
+test("ProxyServer: prevents unauthorised access", async (t) => {
+	const mf = new Miniflare({ script: nullScript });
+	t.teardown(() => mf.dispose());
+	const url = await mf.ready;
+
+	// Check validates `Host` header
+	const statusPromise = new DeferredPromise<number>();
+	const req = http.get(
+		url,
+		{ setHost: false, headers: { "MF-Op": "GET", Host: "localhost" } },
+		(res) => statusPromise.resolve(res.statusCode ?? 0)
+	);
+	req.on("error", (error) => statusPromise.reject(error));
+	t.is(await statusPromise, 401);
+
+	// Check validates `MF-Op-Secret` header
+	let res = await fetch(url, {
+		headers: { "MF-Op": "GET" }, // (missing)
+	});
+	t.is(res.status, 401);
+	await res.arrayBuffer(); // (drain)
+	res = await fetch(url, {
+		headers: { "MF-Op": "GET", "MF-Op-Secret": "aaaa" }, // (too short)
+	});
+	t.is(res.status, 401);
+	await res.arrayBuffer(); // (drain)
+	res = await fetch(url, {
+		headers: { "MF-Op": "GET", "MF-Op-Secret": "a".repeat(32) }, // (wrong)
+	});
+	t.is(res.status, 401);
+	await res.arrayBuffer(); // (drain)
 });

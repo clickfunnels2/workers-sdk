@@ -3,9 +3,9 @@ import { readdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import globToRegExp from "glob-to-regexp";
-import { exports as resolveExports } from "resolve.exports";
+import { sync as resolveSync } from "resolve";
+import { UserError } from "../errors";
 import { logger } from "../logger";
-import { BUILD_CONDITIONS } from "./bundle";
 import {
 	findAdditionalModules,
 	findAdditionalModuleWatchDirs,
@@ -18,7 +18,7 @@ import type esbuild from "esbuild";
 
 function flipObject<
 	K extends string | number | symbol,
-	V extends string | number | symbol
+	V extends string | number | symbol,
 >(obj: Record<K, V>): Record<V, K> {
 	return Object.fromEntries(Object.entries(obj).map(([k, v]) => [v, k]));
 }
@@ -30,6 +30,9 @@ export const RuleTypeToModuleType: Record<ConfigModuleRuleType, CfModuleType> =
 		CompiledWasm: "compiled-wasm",
 		Data: "buffer",
 		Text: "text",
+		PythonModule: "python",
+		PythonRequirement: "python-requirement",
+		NodeJsCompatModule: "nodejs-compat-module",
 	};
 
 export const ModuleTypeToRuleType = flipObject(RuleTypeToModuleType);
@@ -65,23 +68,6 @@ export const noopModuleCollector: ModuleCollector = {
 		},
 	},
 };
-
-// Extracts a package name from a string that may be a file path
-// or a package name. Returns null if the string is not a valid
-// Handles `wrangler`, `wrangler/example`, `wrangler/example.wasm`,
-// `@cloudflare/wrangler`, `@cloudflare/wrangler/example`, etc.
-export function extractPackageName(packagePath: string) {
-	if (packagePath.startsWith(".")) return null;
-
-	const match = packagePath.match(/^(@[^/]+\/)?([^/]+)/);
-
-	if (match) {
-		const scoped = match[1] || "";
-		const packageName = match[2];
-		return `${scoped}${packageName}`;
-	}
-	return null;
-}
 
 export function createModuleCollector(props: {
 	entry: Entry;
@@ -219,7 +205,9 @@ export function createModuleCollector(props: {
 								.createHash("sha1")
 								.update(fileContent)
 								.digest("hex");
-							const fileName = `./${fileHash}-${path.basename(args.path)}`;
+							const fileName = props.preserveFileNames
+								? args.path
+								: `./${fileHash}-${path.basename(args.path)}`;
 
 							const { rule } =
 								rulesMatchers.find(({ regex }) => regex.test(fileName)) || {};
@@ -253,6 +241,10 @@ export function createModuleCollector(props: {
 						build.onResolve(
 							{ filter: globToRegExp(glob) },
 							async (args: esbuild.OnResolveArgs) => {
+								if (args.pluginData?.skip) {
+									return;
+								}
+
 								// take the file and massage it to a
 								// transportable/manageable format
 
@@ -268,60 +260,49 @@ export function createModuleCollector(props: {
 								// callback if `findAdditionalModules` is true. If we didn't
 								// find the module in `modules` in the above `if` block, leave
 								// it to `esbuild` to bundle it.
-								if (isJavaScriptModuleRule(rule)) return;
+								if (isJavaScriptModuleRule(rule)) {
+									return;
+								}
 
 								// Check if this file is possibly from an npm package
 								// and if so, validate the import against the package.json exports
 								// and resolve the file path to the correct file.
-								if (args.path.includes("/") && !args.path.startsWith(".")) {
-									// get npm package name from string, taking into account scoped packages
-									const packageName = extractPackageName(args.path);
-									if (!packageName) {
-										throw new Error(
-											`Unable to extract npm package name from ${args.path}`
-										);
+								try {
+									const resolved = await build.resolve(args.path, {
+										kind: "import-statement",
+										resolveDir: args.resolveDir,
+										pluginData: {
+											skip: true,
+										},
+									});
+									if (resolved.path) {
+										filePath = resolved.path;
 									}
-									const packageJsonPath = path.join(
-										process.cwd(),
-										"node_modules",
-										packageName,
-										"package.json"
-									);
-									// Try and read the npm package's package.json
-									// and then resolve the import against the package's exports
-									// and then finally override filePath if we find a match.
-									try {
-										const packageJson = JSON.parse(
-											await readFile(packageJsonPath, "utf8")
-										);
-										const testResolved = resolveExports(
-											packageJson,
-											args.path.replace(`${packageName}/`, ""),
-											{
-												conditions: BUILD_CONDITIONS,
-											}
-										);
-										if (testResolved) {
-											filePath = path.join(
-												process.cwd(),
-												"node_modules",
-												packageName,
-												testResolved[0]
-											);
-										}
-									} catch (e) {
-										// We tried, now it'll just fall-through to the previous behaviour
-										// and ENOENT if the absolute file path doesn't exist.
-									}
+								} catch (ex) {
+									// We tried, now it'll just fall-through to the previous behaviour
+									// and ENOENT if the absolute file path doesn't exist.
 								}
 
+								// Next try to resolve using the node module resolution algorithm
+								try {
+									const resolved = resolveSync(args.path, {
+										basedir: args.resolveDir,
+									});
+									filePath = resolved;
+								} catch (e) {
+									// We tried, now it'll just fall-through to the previous behaviour
+									// and ENOENT if the absolute file path doesn't exist.
+								}
+
+								// Finally, load the file and hash it
+								// If we didn't do any smart resolution above, this will attempt to load as an absolute path
 								const fileContent = await readFile(filePath);
 								const fileHash = crypto
 									.createHash("sha1")
 									.update(fileContent)
 									.digest("hex");
 								const fileName = props.preserveFileNames
-									? filePath
+									? args.path
 									: `./${fileHash}-${path.basename(args.path)}`;
 
 								// add the module to the array
@@ -367,7 +348,7 @@ export function createModuleCollector(props: {
 						build.onResolve(
 							{ filter: globToRegExp(glob) },
 							async (args: esbuild.OnResolveArgs) => {
-								throw new Error(
+								throw new UserError(
 									`The file ${
 										args.path
 									} matched a module rule in your configuration (${JSON.stringify(

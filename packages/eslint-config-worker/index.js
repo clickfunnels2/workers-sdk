@@ -8,7 +8,7 @@ module.exports = {
 	ignorePatterns: [
 		"**/node_modules/**",
 		"examples",
-		"**/templates/**",
+		"**/templates/**/*.*",
 		".eslintrc.js",
 		"**/dist/**",
 	],
@@ -18,19 +18,7 @@ module.exports = {
 		sourceType: "module",
 		project: true,
 	},
-	settings: {
-		react: {
-			version: "detect",
-		},
-	},
-	plugins: [
-		"@typescript-eslint",
-		"eslint-plugin-react",
-		"eslint-plugin-react-hooks",
-		"import",
-		"unused-imports",
-		"no-only-tests",
-	],
+	plugins: ["@typescript-eslint", "import", "unused-imports", "no-only-tests"],
 	extends: ["turbo"],
 	overrides: [
 		{
@@ -38,40 +26,31 @@ module.exports = {
 			extends: [
 				"eslint:recommended",
 				"plugin:@typescript-eslint/recommended",
-				"plugin:react/recommended",
-				"plugin:react-hooks/recommended",
 				"plugin:import/typescript",
 				"turbo",
 			],
 
 			rules: {
+				curly: ["error", "all"],
 				"no-empty": "off",
 				"no-empty-function": "off",
 				"no-mixed-spaces-and-tabs": ["error", "smart-tabs"],
 				"no-only-tests/no-only-tests": "error",
-				"no-shadow": "error",
 				"require-yield": "off",
 				"@typescript-eslint/consistent-type-imports": ["error"],
 				"@typescript-eslint/no-empty-function": "off",
 				"@typescript-eslint/no-explicit-any": "error",
 				"@typescript-eslint/no-floating-promises": "error",
-				"@typescript-eslint/no-unused-vars": "off",
-				"import/order": [
+				"@typescript-eslint/no-non-null-assertion": "error",
+				"no-shadow": "off",
+				"@typescript-eslint/no-shadow": "error",
+				"no-unused-vars": "off",
+				"@typescript-eslint/no-unused-vars": [
 					"error",
 					{
-						groups: [
-							"builtin",
-							"external",
-							"internal",
-							"parent",
-							"sibling",
-							"index",
-							"object",
-							"type",
-						],
-						alphabetize: {
-							order: "asc",
-						},
+						argsIgnorePattern: ".*",
+						varsIgnorePattern: "^_",
+						ignoreRestSiblings: true,
 					},
 				],
 				"unused-imports/no-unused-imports": "error",

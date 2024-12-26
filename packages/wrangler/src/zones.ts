@@ -1,4 +1,6 @@
 import { fetchListResult } from "./cfetch";
+import { configFileName } from "./config";
+import { UserError } from "./errors";
 import type { Route } from "./config/environment";
 
 /**
@@ -48,16 +50,20 @@ export function getHostFromRoute(route: Route): string | undefined {
  * - We try to extract a host from it
  * - We try to get a zone id from the host
  */
-export async function getZoneForRoute(route: Route): Promise<Zone | undefined> {
+export async function getZoneForRoute(from: {
+	route: Route;
+	accountId: string;
+}): Promise<Zone | undefined> {
+	const { route, accountId } = from;
 	const host = getHostFromRoute(route);
 	let id: string | undefined;
 
 	if (typeof route === "object" && "zone_id" in route) {
 		id = route.zone_id;
 	} else if (typeof route === "object" && "zone_name" in route) {
-		id = await getZoneIdFromHost(route.zone_name);
+		id = await getZoneIdFromHost({ host: route.zone_name, accountId });
 	} else if (host) {
-		id = await getZoneIdFromHost(host);
+		id = await getZoneIdFromHost({ host, accountId });
 	}
 
 	return id && host ? { id, host } : undefined;
@@ -92,7 +98,25 @@ export function getHostFromUrl(urlLike: string): string | undefined {
 		return undefined;
 	}
 }
-
+export async function getZoneIdForPreview(from: {
+	host: string | undefined;
+	routes: Route[] | undefined;
+	accountId: string;
+}) {
+	const { host, routes, accountId } = from;
+	let zoneId: string | undefined;
+	if (host) {
+		zoneId = await getZoneIdFromHost({ host, accountId });
+	}
+	if (!zoneId && routes) {
+		const firstRoute = routes[0];
+		const zone = await getZoneForRoute({ route: firstRoute, accountId });
+		if (zone) {
+			zoneId = zone.id;
+		}
+	}
+	return zoneId;
+}
 /**
  * Given something that resembles a host, try to infer a zone id from it.
  *
@@ -100,14 +124,20 @@ export function getHostFromUrl(urlLike: string): string | undefined {
  * For each domain-like part of the host (e.g. w.x.y.z) try to get a zone id for it by
  * lopping off subdomains until we get a hit from the API.
  */
-export async function getZoneIdFromHost(host: string): Promise<string> {
-	const hostPieces = host.split(".");
+async function getZoneIdFromHost(from: {
+	host: string;
+	accountId: string;
+}): Promise<string> {
+	const hostPieces = from.host.split(".");
 
 	while (hostPieces.length > 1) {
 		const zones = await fetchListResult<{ id: string }>(
 			`/zones`,
 			{},
-			new URLSearchParams({ name: hostPieces.join(".") })
+			new URLSearchParams({
+				name: hostPieces.join("."),
+				"account.id": from.accountId,
+			})
 		);
 		if (zones.length > 0) {
 			return zones[0].id;
@@ -115,7 +145,9 @@ export async function getZoneIdFromHost(host: string): Promise<string> {
 		hostPieces.shift();
 	}
 
-	throw new Error(`Could not find zone for ${host}`);
+	throw new UserError(
+		`Could not find zone for \`${from.host}\`. Make sure the domain is set up to be proxied by Cloudflare.\nFor more details, refer to https://developers.cloudflare.com/workers/configuration/routing/routes/#set-up-a-route`
+	);
 }
 
 /**
@@ -130,7 +162,7 @@ interface WorkerRoute {
 /**
  * Given a zone within the user's account, return a list of all assigned worker routes
  */
-export async function getRoutesForZone(zone: string): Promise<WorkerRoute[]> {
+async function getRoutesForZone(zone: string): Promise<WorkerRoute[]> {
 	const routes = await fetchListResult<WorkerRoute>(
 		`/zones/${zone}/workers/routes`
 	);
@@ -167,7 +199,7 @@ function distanceBetween(a: string, b: string, cache = new Map()): number {
 /**
  * Given an invalid route, sort the valid routes by closeness to the invalid route (levenstein distance)
  */
-export function findClosestRoute(
+function findClosestRoute(
 	providedRoute: string,
 	assignedRoutes: WorkerRoute[]
 ): WorkerRoute[] {
@@ -181,10 +213,17 @@ export function findClosestRoute(
 /**
  * Given a route (must be assigned and within the correct zone), return the name of the worker assigned to it
  */
-export async function getWorkerForZone(worker: string) {
-	const zone = await getZoneForRoute(worker);
+export async function getWorkerForZone(
+	from: {
+		worker: string;
+		accountId: string;
+	},
+	configPath: string | undefined
+) {
+	const { worker, accountId } = from;
+	const zone = await getZoneForRoute({ route: worker, accountId });
 	if (!zone) {
-		throw new Error(
+		throw new UserError(
 			`The route '${worker}' is not part of one of your zones. Either add this zone from the Cloudflare dashboard, or try using a route within one of your existing zones.`
 		);
 	}
@@ -196,11 +235,11 @@ export async function getWorkerForZone(worker: string) {
 		const closestRoute = findClosestRoute(worker, routes)?.[0];
 
 		if (!closestRoute) {
-			throw new Error(
-				`The route '${worker}' has no workers assigned. You can assign a worker to it from wrangler.toml or the Cloudflare dashboard`
+			throw new UserError(
+				`The route '${worker}' has no workers assigned. You can assign a worker to it from your ${configFileName(configPath)} file or the Cloudflare dashboard`
 			);
 		} else {
-			throw new Error(
+			throw new UserError(
 				`The route '${worker}' has no workers assigned. Did you mean to tail the route '${closestRoute.pattern}'?`
 			);
 		}

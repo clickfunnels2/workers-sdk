@@ -1,4 +1,4 @@
-import { rest } from "msw";
+import { http, HttpResponse } from "msw";
 import { mockAccountId, mockApiToken } from "./helpers/mock-account-id";
 import { mockConsoleMethods } from "./helpers/mock-console";
 import { mockConfirm } from "./helpers/mock-dialogs";
@@ -6,9 +6,10 @@ import { useMockIsTTY } from "./helpers/mock-istty";
 import { msw } from "./helpers/msw";
 import { runInTempDir } from "./helpers/run-in-tmp";
 import { runWrangler } from "./helpers/run-wrangler";
-import writeWranglerToml from "./helpers/write-wrangler-toml";
+import { writeWranglerConfig } from "./helpers/write-wrangler-config";
 import type { ServiceReferenceResponse, Tail } from "../delete";
 import type { KVNamespaceInfo } from "../kv/helpers";
+
 describe("delete", () => {
 	mockAccountId();
 	mockApiToken();
@@ -46,7 +47,7 @@ describe("delete", () => {
 			text: `Are you sure you want to delete test-name? This action cannot be undone.`,
 			result: true,
 		});
-		writeWranglerToml();
+		writeWranglerConfig();
 		mockListKVNamespacesRequest();
 		mockListReferencesRequest("test-name");
 		mockListTailsByConsumerRequest("test-name");
@@ -117,15 +118,16 @@ describe("delete", () => {
 		mockListKVNamespacesRequest(...kvNamespaces);
 		// it should only try to delete the site namespace associated with this worker
 		msw.use(
-			rest.delete(
+			http.delete(
 				"*/accounts/:accountId/storage/kv/namespaces/id-for-my-script-site-ns",
-				(req, res, ctx) => {
-					expect(req.params.accountId).toEqual("some-account-id");
-					return res.once(
-						ctx.status(200),
-						ctx.json({ success: true, errors: [], messages: [], result: null })
+				({ params }) => {
+					expect(params.accountId).toEqual("some-account-id");
+					return HttpResponse.json(
+						{ success: true, errors: [], messages: [], result: null },
+						{ status: 200 }
 					);
-				}
+				},
+				{ once: true }
 			)
 		);
 
@@ -175,38 +177,40 @@ describe("delete", () => {
 		// it should only try to delete the site namespace associated with this worker
 
 		msw.use(
-			rest.delete(
+			http.delete(
 				"*/accounts/:accountId/storage/kv/namespaces/id-for-my-script-site-ns",
-				(req, res, ctx) => {
-					expect(req.params.accountId).toEqual("some-account-id");
-					return res.once(
-						ctx.status(200),
-						ctx.json({
+				({ params }) => {
+					expect(params.accountId).toEqual("some-account-id");
+					return HttpResponse.json(
+						{
 							success: true,
 							errors: [],
 							messages: [],
 							result: {},
-						})
+						},
+						{ status: 200 }
 					);
-				}
+				},
+				{ once: true }
 			)
 		);
 
 		msw.use(
-			rest.delete(
+			http.delete(
 				"*/accounts/:accountId/storage/kv/namespaces/id-for-my-script-site-preview-ns",
-				(req, res, ctx) => {
-					expect(req.params.accountId).toEqual("some-account-id");
-					return res.once(
-						ctx.status(200),
-						ctx.json({
+				({ params }) => {
+					expect(params.accountId).toEqual("some-account-id");
+					return HttpResponse.json(
+						{
 							success: true,
 							errors: [],
 							messages: [],
 							result: {},
-						})
+						},
+						{ status: 200 }
 					);
-				}
+				},
+				{ once: true }
 			)
 		);
 
@@ -225,6 +229,17 @@ describe("delete", () => {
 	`);
 	});
 
+	it("should error helpfully if pages_build_output_dir is set", async () => {
+		writeWranglerConfig({ pages_build_output_dir: "dist", name: "test" });
+		await expect(
+			runWrangler("delete")
+		).rejects.toThrowErrorMatchingInlineSnapshot(
+			`
+			[Error: It looks like you've run a Workers-specific command in a Pages project.
+			For Pages, please run \`wrangler pages project delete\` instead.]
+		`
+		);
+	});
 	describe("force deletes", () => {
 		it("should prompt for extra confirmation when service is depended on and use force", async () => {
 			mockConfirm({
@@ -244,7 +259,7 @@ You can still delete this Worker, but doing so WILL BREAK the Workers that depen
 Are you sure you want to continue?`,
 				result: true,
 			});
-			writeWranglerToml();
+			writeWranglerConfig();
 			mockListKVNamespacesRequest();
 			mockListReferencesRequest("test-name", {
 				services: {
@@ -325,7 +340,7 @@ You can still delete this Worker, but doing so WILL BREAK the Workers that depen
 Are you sure you want to continue?`,
 				result: false,
 			});
-			writeWranglerToml();
+			writeWranglerConfig();
 			mockListKVNamespacesRequest();
 			mockListReferencesRequest("test-name", {
 				services: {
@@ -354,7 +369,7 @@ Are you sure you want to continue?`,
 		});
 
 		it("should not require confirmation when --force is used", async () => {
-			writeWranglerToml();
+			writeWranglerConfig();
 			mockListKVNamespacesRequest();
 			mockDeleteWorkerRequest({ force: true });
 			await runWrangler("delete --force");
@@ -383,30 +398,33 @@ function mockDeleteWorkerRequest(
 ) {
 	const { env, legacyEnv, name } = options;
 	msw.use(
-		rest.delete(
+		http.delete(
 			"*/accounts/:accountId/workers/services/:scriptName",
-			(req, res, ctx) => {
-				expect(req.params.accountId).toEqual("some-account-id");
-				expect(req.params.scriptName).toEqual(
+			({ request, params }) => {
+				const url = new URL(request.url);
+
+				expect(params.accountId).toEqual("some-account-id");
+				expect(params.scriptName).toEqual(
 					legacyEnv && env
 						? `${name ?? "test-name"}-${env}`
 						: `${name ?? "test-name"}`
 				);
 
-				expect(req.url.searchParams.get("force")).toEqual(
+				expect(url.searchParams.get("force")).toEqual(
 					options.force ? "true" : "false"
 				);
 
-				return res.once(
-					ctx.status(200),
-					ctx.json({
+				return HttpResponse.json(
+					{
 						success: true,
 						errors: [],
 						messages: [],
 						result: null,
-					})
+					},
+					{ status: 200 }
 				);
-			}
+			},
+			{ once: true }
 		)
 	);
 }
@@ -414,18 +432,22 @@ function mockDeleteWorkerRequest(
 /** Create a mock handler for the request to get a list of all KV namespaces. */
 function mockListKVNamespacesRequest(...namespaces: KVNamespaceInfo[]) {
 	msw.use(
-		rest.get("*/accounts/:accountId/storage/kv/namespaces", (req, res, ctx) => {
-			expect(req.params.accountId).toEqual("some-account-id");
-			return res.once(
-				ctx.status(200),
-				ctx.json({
-					success: true,
-					errors: [],
-					messages: [],
-					result: namespaces,
-				})
-			);
-		})
+		http.get(
+			"*/accounts/:accountId/storage/kv/namespaces",
+			({ params }) => {
+				expect(params.accountId).toEqual("some-account-id");
+				return HttpResponse.json(
+					{
+						success: true,
+						errors: [],
+						messages: [],
+						result: namespaces,
+					},
+					{ status: 200 }
+				);
+			},
+			{ once: true }
+		)
 	);
 }
 
@@ -434,42 +456,44 @@ function mockListReferencesRequest(
 	references: ServiceReferenceResponse = {}
 ) {
 	msw.use(
-		rest.get(
+		http.get(
 			"*/accounts/:accountId/workers/scripts/:scriptName/references",
-			(req, res, ctx) => {
-				expect(req.params.accountId).toEqual("some-account-id");
-				expect(req.params.scriptName).toEqual(forScript);
-				return res.once(
-					ctx.status(200),
-					ctx.json({
+			({ params }) => {
+				expect(params.accountId).toEqual("some-account-id");
+				expect(params.scriptName).toEqual(forScript);
+				return HttpResponse.json(
+					{
 						success: true,
 						errors: [],
 						messages: [],
 						result: references,
-					})
+					},
+					{ status: 200 }
 				);
-			}
+			},
+			{ once: true }
 		)
 	);
 }
 
 function mockListTailsByConsumerRequest(forScript: string, tails: Tail[] = []) {
 	msw.use(
-		rest.get(
+		http.get(
 			"*/accounts/:accountId/workers/tails/by-consumer/:scriptName",
-			(req, res, ctx) => {
-				expect(req.params.accountId).toEqual("some-account-id");
-				expect(req.params.scriptName).toEqual(forScript);
-				return res.once(
-					ctx.status(200),
-					ctx.json({
+			({ params }) => {
+				expect(params.accountId).toEqual("some-account-id");
+				expect(params.scriptName).toEqual(forScript);
+				return HttpResponse.json(
+					{
 						success: true,
 						errors: [],
 						messages: [],
 						result: tails,
-					})
+					},
+					{ status: 200 }
 				);
-			}
+			},
+			{ once: true }
 		)
 	);
 }

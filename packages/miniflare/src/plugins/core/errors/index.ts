@@ -1,17 +1,17 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import type { UrlAndMap } from "source-map-support";
 import { z } from "zod";
 import { Request, Response } from "../../../http";
 import { Log } from "../../../shared";
 import { maybeParseURL } from "../../shared";
 import {
-	SourceOptions,
 	contentsToString,
 	maybeGetStringScriptPathIndex,
+	SourceOptions,
 } from "../modules";
 import { getSourceMapper } from "./sourcemap";
+import type { UrlAndMap } from "@cspotcode/source-map-support";
 
 // Subset of core worker options that define Worker source code.
 // These are the possible cases, and corresponding reported source files in
@@ -49,7 +49,7 @@ interface SourceFile {
 }
 
 // Try to read a file from the file-system, returning undefined if not found
-function maybeGetDiskFile(filePath: string): SourceFile | undefined {
+function maybeGetDiskFile(filePath: string): Required<SourceFile> | undefined {
 	try {
 		const contents = fs.readFileSync(filePath, "utf8");
 		return { path: filePath, contents };
@@ -259,14 +259,14 @@ export async function handlePrettyErrorRequest(
 	// `cause` is usually more useful than the error itself, display that instead
 	// TODO(someday): would be nice if we could display both
 	const youch = new Youch(error.cause ?? error, {
-		url: request.url,
+		url: request.cf?.prettyErrorOriginalUrl ?? request.url,
 		method: request.method,
 		headers: Object.fromEntries(request.headers),
 	});
 	youch.addLink(() => {
 		return [
 			'<a href="https://developers.cloudflare.com/workers/" target="_blank" style="text-decoration:none">📚 Workers Docs</a>',
-			'<a href="https://discord.gg/cloudflaredev" target="_blank" style="text-decoration:none">💬 Workers Discord</a>',
+			'<a href="https://discord.cloudflare.com" target="_blank" style="text-decoration:none">💬 Workers Discord</a>',
 		].join("");
 	});
 	return new Response(await youch.toHTML(), {
@@ -274,3 +274,5 @@ export async function handlePrettyErrorRequest(
 		headers: { "Content-Type": "text/html;charset=utf-8" },
 	});
 }
+
+export { getFreshSourceMapSupport } from "./sourcemap";

@@ -11,13 +11,11 @@ body:
         Thank you for taking the time to file a bug report! Please fill out this form as completely as possible.
   - type: dropdown
     id: products
-    validations:
-      required: true
     attributes:
       label: Which Cloudflare product(s) does this pertain to?
       multiple: true
       options:
-        - C3
+        - C3 (npm create cloudflare)
         - D1
         - KV
         - Pages
@@ -25,42 +23,40 @@ body:
         - Queues
         - R2
         - Workers for Platforms
-        - Constellation
+        - Workers AI
         - Workers Runtime
-        - Wrangler core
+        - Wrangler
         - Miniflare
+        - KV Asset Handler
+        - Workers Vitest Integration
         - Other
-  - type: input
-    attributes:
-      label: What version(s) of the tool(s) are you using?
-      placeholder: 0.0.0 [Wrangler], 0.0.0 [C3], etc.
     validations:
       required: true
   - type: input
     attributes:
-      label: What version of Node are you using?
-      placeholder: 0.0.0
-    validations:
-      required: false
-  - type: input
-    attributes:
-      label: What operating system are you using?
-      placeholder: Mac, Windows, Linux (or WSL)
+      label: What versions are you using?
+      placeholder: 0.0.0 [Wrangler], 0.0.0 [C3], 0.0.0 [Node.js], etc.
     validations:
       required: true
-  - type: textarea
+  - type: input
     attributes:
-      label: Describe the Bug
-      description: Include steps to reproduce, describe the behaviour you observe, and describe the behaviour you _expect_ to observe.
+      label: What operating system and version are you using?
+      placeholder: Mac Sonoma 14.2.1, Windows 11, Linux (or WSL) Debian Bookworm, etc.
     validations:
       required: true
   - type: input
     attributes:
       label: Please provide a link to a minimal reproduction
-      description: Although not required, we often request a minimal reproduction to help troubleshoot the issue, so providing this up-front streamlines the process towards resolution.
       placeholder: https://github.com/foobar-user/minimal-repro
     validations:
       required: false
+  - type: textarea
+    attributes:
+      label: Describe the Bug
+      description: Please describe the bug in as much detail as possible, including steps to reproduce, the behaviour you're seeing, and the behaviour you expect.
+      validations:
+      required: true
+
   - type: textarea
     attributes:
       label: Please provide any relevant error logs

@@ -1,207 +1,133 @@
+import { existsSync } from "fs";
 import { spawn } from "cross-spawn";
-import { detectPackageManager } from "helpers/packages";
-import { beforeEach, afterEach, describe, expect, test, vi } from "vitest";
+import { readMetricsConfig } from "helpers/metrics-config";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import whichPMRuns from "which-pm-runs";
-import {
-	getWorkerdCompatibilityDate,
-	installPackages,
-	installWrangler,
-	npmInstall,
-	runCommand,
-} from "../command";
-import * as shellquote from "../shell-quote";
+import { quoteShellArgs, runCommand } from "../command";
+import type { ChildProcess } from "child_process";
 
 // We can change how the mock spawn works by setting these variables
 let spawnResultCode = 0;
 let spawnStdout: string | undefined = undefined;
 let spawnStderr: string | undefined = undefined;
 
+vi.mock("cross-spawn");
+vi.mock("fs");
+vi.mock("which-pm-runs");
+vi.mock("helpers/metrics-config");
+
 describe("Command Helpers", () => {
 	afterEach(() => {
-		vi.clearAllMocks();
 		spawnResultCode = 0;
 		spawnStdout = undefined;
 		spawnStderr = undefined;
 	});
 
 	beforeEach(() => {
-		// Mock out the child_process.spawn function
-		vi.mock("cross-spawn", () => {
-			const mockedSpawn = vi.fn().mockImplementation(() => {
-				return {
-					on: vi.fn().mockImplementation((event, cb) => {
-						if (event === "close") {
-							cb(spawnResultCode);
-						}
-					}),
-					stdout: {
-						on(event: "data", cb: (data: string) => void) {
-							spawnStdout !== undefined && cb(spawnStdout);
-						},
+		vi.mocked(spawn).mockImplementation(() => {
+			return {
+				on: vi.fn().mockImplementation((event, cb) => {
+					if (event === "close") {
+						cb(spawnResultCode);
+					}
+				}),
+				stdout: {
+					on(_event: "data", cb: (data: string) => void) {
+						spawnStdout !== undefined && cb(spawnStdout);
 					},
-					stderr: {
-						on(event: "data", cb: (data: string) => void) {
-							spawnStderr !== undefined && cb(spawnStderr);
-						},
+				},
+				stderr: {
+					on(_event: "data", cb: (data: string) => void) {
+						spawnStderr !== undefined && cb(spawnStderr);
 					},
-				};
-			});
-
-			return { spawn: mockedSpawn };
+				},
+			} as unknown as ChildProcess;
 		});
-		vi.mock("which-pm-runs");
+
 		vi.mocked(whichPMRuns).mockReturnValue({ name: "npm", version: "8.3.1" });
-
-		vi.mock("fs", () => ({
-			existsSync: vi.fn(() => false),
-		}));
+		vi.mocked(existsSync).mockImplementation(() => false);
 	});
-
-	const expectSpawnWith = (cmd: string) => {
-		const [command, ...args] = shellquote.parse(cmd);
-
-		expect(spawn).toHaveBeenCalledWith(command, args, {
-			stdio: "inherit",
-			env: process.env,
-		});
-	};
-
-	const expectSilentSpawnWith = (cmd: string) => {
-		const [command, ...args] = shellquote.parse(cmd);
-
-		expect(spawn).toHaveBeenCalledWith(command, args, {
-			stdio: "pipe",
-			env: process.env,
-		});
-	};
 
 	test("runCommand", async () => {
-		await runCommand("ls -l");
-		expectSpawnWith("ls -l");
-
-		await runCommand(" ls -l ");
-		expectSpawnWith("ls -l");
-
-		await runCommand(" ls  -l ");
-		expectSpawnWith("ls -l");
-
-		await runCommand(" ls \t -l ");
-		expectSpawnWith("ls -l");
-	});
-
-	test("installWrangler", async () => {
-		await installWrangler();
-
-		expectSilentSpawnWith("npm install --save-dev wrangler");
-	});
-
-	test("npmInstall", async () => {
-		await npmInstall();
-		expectSilentSpawnWith("npm install");
-	});
-
-	test("npmInstall from pnpm", async () => {
-		vi.mocked(whichPMRuns).mockReturnValue({
-			name: "pnpm",
-			version: "8.5.1",
+		await runCommand(["ls", "-l"]);
+		expect(spawn).toHaveBeenCalledWith("ls", ["-l"], {
+			stdio: "inherit",
+			env: process.env,
+			signal: expect.any(AbortSignal),
 		});
-
-		await npmInstall();
-		expectSilentSpawnWith("pnpm install");
 	});
 
-	test("installPackages", async () => {
-		await installPackages(["foo", "bar", "baz"], { dev: true });
-		expectSilentSpawnWith("npm install --save-dev foo bar baz");
-	});
-
-	describe("detectPackageManager", async () => {
-		let pm = detectPackageManager();
-
-		test("npm", () => {
-			expect(pm.npm).toBe("npm");
-			expect(pm.npx).toBe("npx");
-			expect(pm.dlx).toBe("npx");
-		});
-
-		test("pnpm", () => {
-			vi.mocked(whichPMRuns).mockReturnValue({
-				name: "pnpm",
-				version: "8.5.1",
+	describe("respect telemetry permissions when running wrangler", () => {
+		test("runCommand has WRANGLER_SEND_METRICS=false if its a wrangler command and c3 telemetry is disabled", async () => {
+			vi.mocked(readMetricsConfig).mockReturnValue({
+				c3permission: {
+					enabled: false,
+					date: new Date(2000),
+				},
 			});
-			pm = detectPackageManager();
-			expect(pm.npm).toBe("pnpm");
-			expect(pm.npx).toBe("pnpm");
-			expect(pm.dlx).toBe("pnpm dlx");
+			await runCommand(["npx", "wrangler"]);
 
-			vi.mocked(whichPMRuns).mockReturnValue({
-				name: "pnpm",
-				version: "6.35.1",
-			});
-			pm = detectPackageManager();
-			expect(pm.npm).toBe("pnpm");
-			expect(pm.npx).toBe("pnpm");
-			expect(pm.dlx).toBe("pnpm dlx");
-
-			vi.mocked(whichPMRuns).mockReturnValue({
-				name: "pnpm",
-				version: "5.18.10",
-			});
-			pm = detectPackageManager();
-			expect(pm.npm).toBe("pnpm");
-			expect(pm.npx).toBe("pnpx");
-			expect(pm.dlx).toBe("pnpx");
+			expect(spawn).toHaveBeenCalledWith(
+				"npx",
+				["wrangler"],
+				expect.objectContaining({
+					env: expect.objectContaining({ WRANGLER_SEND_METRICS: "false" }),
+				}),
+			);
 		});
 
-		test("yarn", () => {
-			vi.mocked(whichPMRuns).mockReturnValue({
-				name: "yarn",
-				version: "3.5.1",
+		test("runCommand doesn't have WRANGLER_SEND_METRICS=false if its a wrangler command and c3 telemetry is enabled", async () => {
+			vi.mocked(readMetricsConfig).mockReturnValue({
+				c3permission: {
+					enabled: true,
+					date: new Date(2000),
+				},
 			});
-			pm = detectPackageManager();
-			expect(pm.npm).toBe("yarn");
-			expect(pm.npx).toBe("yarn");
-			expect(pm.dlx).toBe("yarn dlx");
+			await runCommand(["npx", "wrangler"]);
 
-			vi.mocked(whichPMRuns).mockReturnValue({
-				name: "yarn",
-				version: "1.22.0",
+			expect(spawn).toHaveBeenCalledWith(
+				"npx",
+				["wrangler"],
+				expect.objectContaining({
+					env: expect.not.objectContaining({ WRANGLER_SEND_METRICS: "false" }),
+				}),
+			);
+		});
+
+		test("runCommand doesn't have WRANGLER_SEND_METRICS=false if not a wrangler command", async () => {
+			vi.mocked(readMetricsConfig).mockReturnValue({
+				c3permission: {
+					enabled: false,
+					date: new Date(2000),
+				},
 			});
-			pm = detectPackageManager();
-			expect(pm.npm).toBe("yarn");
-			expect(pm.npx).toBe("yarn");
-			expect(pm.dlx).toBe("yarn");
+			await runCommand(["ls", "-l"]);
+
+			expect(spawn).toHaveBeenCalledWith(
+				"ls",
+				["-l"],
+				expect.objectContaining({
+					env: expect.not.objectContaining({ WRANGLER_SEND_METRICS: "false" }),
+				}),
+			);
 		});
 	});
 
-	describe("getWorkerdCompatibilityDate()", () => {
-		test("normal flow", async () => {
-			spawnStdout = "2.20250110.5";
-			const date = await getWorkerdCompatibilityDate();
-			expectSilentSpawnWith("npm info workerd dist-tags.latest");
-			expect(date).toBe("2025-01-10");
+	describe("quoteShellArgs", () => {
+		test.runIf(process.platform !== "win32")("mac", async () => {
+			expect(quoteShellArgs([`pages:dev`])).toEqual("pages:dev");
+			expect(quoteShellArgs([`24.02 foo-bar`])).toEqual(`'24.02 foo-bar'`);
+			expect(quoteShellArgs([`foo/10 bar/20-baz/`])).toEqual(
+				`'foo/10 bar/20-baz/'`,
+			);
 		});
 
-		test("empty result", async () => {
-			spawnStdout = "";
-			const date = await getWorkerdCompatibilityDate();
-			expectSilentSpawnWith("npm info workerd dist-tags.latest");
-			expect(date).toBe("2023-05-18");
-		});
-
-		test("verbose output (e.g. yarn or debug mode)", async () => {
-			spawnStdout =
-				"Debugger attached.\nyarn info v1.22.19\n2.20250110.5\n✨  Done in 0.83s.";
-			const date = await getWorkerdCompatibilityDate();
-			expectSilentSpawnWith("npm info workerd dist-tags.latest");
-			expect(date).toBe("2025-01-10");
-		});
-
-		test("command failed", async () => {
-			spawnResultCode = 1;
-			const date = await getWorkerdCompatibilityDate();
-			expectSilentSpawnWith("npm info workerd dist-tags.latest");
-			expect(date).toBe("2023-05-18");
+		test.runIf(process.platform === "win32")("windows", async () => {
+			expect(quoteShellArgs([`pages:dev`])).toEqual("pages:dev");
+			expect(quoteShellArgs([`24.02 foo-bar`])).toEqual(`"24.02 foo-bar"`);
+			expect(quoteShellArgs([`foo/10 bar/20-baz/`])).toEqual(
+				`"foo/10 bar/20-baz/"`,
+			);
 		});
 	});
 });

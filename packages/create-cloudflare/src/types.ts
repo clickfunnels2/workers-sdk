@@ -1,58 +1,53 @@
-import type { FrameworkMap } from "frameworks/index";
-
-export type FrameworkName = keyof typeof FrameworkMap;
+import type { TemplateConfig } from "./templates";
 
 export type C3Args = {
 	projectName: string;
-	type: string;
+	type?: string;
 	deploy?: boolean;
 	open?: boolean;
 	git?: boolean;
 	autoUpdate?: boolean;
-	// pages specific
+	category?: string;
+	// frameworks specific
 	framework?: string;
+	experimental?: boolean;
 	// workers specific
 	ts?: boolean;
+	lang?: string;
 	existingScript?: string;
+	template?: string;
+	acceptDefaults?: boolean;
 	wranglerDefaults?: boolean;
 	additionalArgs?: string[];
+	help?: boolean;
 };
-
 export type C3Arg = C3Args[keyof C3Args];
 
-export type PagesGeneratorContext = {
+export type C3Context = {
 	args: C3Args;
-	deployedUrl?: string;
-	account?: {
-		id: string;
-		name: string;
-	};
-	framework?: {
-		name: string;
-		config: FrameworkConfig;
-		args: string[];
-		commitMessage?: string;
-	};
 	project: {
 		name: string;
 		path: string;
 	};
-	type?: "pages" | "workers";
+	template: TemplateConfig;
+	deployment: DeploymentInfo;
+	account?: {
+		id: string;
+		name: string;
+	};
+	commitMessage?: string;
 	originalCWD: string;
+	gitRepoAlreadyExisted: boolean;
 };
 
-type UpdaterPackageScript = (cmd: string) => string;
+type DeploymentInfo = {
+	url?: string;
+};
 
-export type FrameworkConfig = {
-	generate: (ctx: PagesGeneratorContext) => Promise<void>;
-	configure?: (ctx: PagesGeneratorContext) => Promise<void>;
-	displayName: string;
-	getPackageScripts: () => Promise<
-		Record<string, string | UpdaterPackageScript>
-	>;
-	deployCommand?: string;
-	devCommand?: string;
-	testFlags?: string[];
-	compatibilityFlags?: string[];
-	type?: "pages" | "workers";
+export type PackageJson = Record<string, string> & {
+	name: string;
+	version: string;
+	scripts?: Record<string, string>;
+	dependencies?: Record<string, string>;
+	devDependencies?: Record<string, string>;
 };

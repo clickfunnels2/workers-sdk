@@ -2,9 +2,12 @@ import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import chalk from "chalk";
 import globToRegExp from "glob-to-regexp";
+import { UserError } from "../errors";
 import { logger } from "../logger";
+import { getBundleType } from "./bundle-type";
 import { RuleTypeToModuleType } from "./module-collection";
 import { parseRules } from "./rules";
+import { tryAttachSourcemapToModule } from "./source-maps";
 import type { Rule } from "../config/environment";
 import type { Entry } from "./entry";
 import type { ParsedRules } from "./rules";
@@ -28,19 +31,32 @@ async function* getFiles(
 }
 
 /**
+ * Checks if a given string is a valid Python package identifier.
+ * See https://packaging.python.org/en/latest/specifications/name-normalization/
+ * @param name The package name to validate
+ */
+function isValidPythonPackageName(name: string): boolean {
+	const regex = /^([A-Z0-9]|[A-Z0-9][A-Z0-9._-]*[A-Z0-9])$/i;
+	return regex.test(name);
+}
+
+/**
  * Search the filesystem under the `moduleRoot` of the `entry` for potential additional modules
  * that match the given `rules`.
  */
 export async function findAdditionalModules(
 	entry: Entry,
-	rules: Rule[] | ParsedRules
+	rules: Rule[] | ParsedRules,
+	attachSourcemaps = false
 ): Promise<CfModule[]> {
 	const files = getFiles(entry.moduleRoot, entry.moduleRoot);
 	const relativeEntryPoint = path
 		.relative(entry.moduleRoot, entry.file)
 		.replaceAll("\\", "/");
 
-	if (Array.isArray(rules)) rules = parseRules(rules);
+	if (Array.isArray(rules)) {
+		rules = parseRules(rules);
+	}
 	const modules = (await matchFiles(files, entry.moduleRoot, rules))
 		.filter((m) => m.name !== relativeEntryPoint)
 		.map((m) => ({
@@ -48,17 +64,73 @@ export async function findAdditionalModules(
 			name: m.name,
 		}));
 
+	// Try to find a requirements.txt file
+	const isPythonEntrypoint =
+		getBundleType(entry.format, entry.file) === "python";
+
+	if (isPythonEntrypoint) {
+		let pythonRequirements = "";
+		try {
+			pythonRequirements = await readFile(
+				path.resolve(entry.projectRoot, "requirements.txt"),
+				"utf-8"
+			);
+		} catch (e) {
+			// We don't care if a requirements.txt isn't found
+			logger.debug(
+				"Python entrypoint detected, but no requirements.txt file found."
+			);
+		}
+
+		for (const requirement of pythonRequirements.split("\n")) {
+			if (requirement === "") {
+				continue;
+			}
+			if (!isValidPythonPackageName(requirement)) {
+				throw new UserError(
+					`Invalid Python package name "${requirement}" found in requirements.txt. Note that requirements.txt should contain package names only, not version specifiers.`
+				);
+			}
+
+			modules.push({
+				type: "python-requirement",
+				name: requirement,
+				content: "",
+				filePath: undefined,
+			});
+		}
+	}
+
+	// The modules we find might also have sourcemaps associated with them, so when we go to copy
+	// them into the output directory we need to preserve the sourcemaps.
+	if (attachSourcemaps) {
+		modules.forEach((module) => tryAttachSourcemapToModule(module));
+	}
+
 	if (modules.length > 0) {
 		logger.info(`Attaching additional modules:`);
-		logger.table(
-			modules.map(({ name, type, content }) => {
+		const totalSize = modules.reduce(
+			(previous, { content }) => previous + content.length,
+			0
+		);
+
+		logger.table([
+			...modules.map(({ name, type, content }) => {
 				return {
 					Name: name,
 					Type: type ?? "",
-					Size: `${(content.length / 1024).toFixed(2)} KiB`,
+					Size:
+						type === "python-requirement"
+							? ""
+							: `${(content.length / 1024).toFixed(2)} KiB`,
 				};
-			})
-		);
+			}),
+			{
+				Name: `Total (${modules.length} module${modules.length > 1 ? "s" : ""})`,
+				Type: "",
+				Size: `${(totalSize / 1024).toFixed(2)} KiB`,
+			},
+		]);
 	}
 
 	return modules;
@@ -72,7 +144,7 @@ async function matchFiles(
 	const modules: CfModule[] = [];
 
 	// Use the `moduleNames` set to deduplicate modules.
-	// This is usually a poorly specified `wrangler.toml` configuration, but duplicate modules will cause a crash at runtime
+	// This is usually a poorly specified Wrangler configuration file, but duplicate modules will cause a crash at runtime
 	const moduleNames = new Set<string>();
 
 	for await (const filePath of files) {
@@ -112,7 +184,7 @@ async function matchFiles(
 			for (const glob of rule.globs) {
 				const regexp = globToRegExp(glob);
 				if (regexp.test(filePath)) {
-					throw new Error(
+					throw new UserError(
 						`The file ${filePath} matched a module rule in your configuration (${JSON.stringify(
 							rule
 						)}), but was ignored because a previous rule with the same type was not marked as \`fallthrough = true\`.`
@@ -137,7 +209,9 @@ export async function* findAdditionalModuleWatchDirs(
 	yield root;
 	for (const entry of await readdir(root, { withFileTypes: true })) {
 		if (entry.isDirectory()) {
-			if (entry.name === "node_modules" || entry.name === ".git") continue;
+			if (entry.name === "node_modules" || entry.name === ".git") {
+				continue;
+			}
 			yield* findAdditionalModuleWatchDirs(path.join(root, entry.name));
 		}
 	}
@@ -156,5 +230,10 @@ export async function writeAdditionalModules(
 		logger.debug("Writing additional module to output", modulePath);
 		await mkdir(path.dirname(modulePath), { recursive: true });
 		await writeFile(modulePath, module.content);
+
+		if (module.sourceMap) {
+			const sourcemapPath = path.resolve(destination, module.sourceMap.name);
+			await writeFile(sourcemapPath, module.sourceMap.content);
+		}
 	}
 }

@@ -1,20 +1,30 @@
-import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import pluginRewriteAll from "vite-plugin-rewrite-all";
-import { fileURLToPath } from "node:url";
+import { defineConfig, loadEnv } from "vite";
+
 // https://vitejs.dev/config/
-export default defineConfig({
-	plugins: [pluginRewriteAll(), react()],
-	server: {
-		proxy: {
-			"/playground/api": {
-				target: "https://playground.devprod.cloudflare.dev",
-				changeOrigin: true,
-				rewrite: (path) => path.replace(/^\/playground/, ""),
+export default defineConfig(({ mode }) => {
+	const playgroundHost = loadEnv(mode, process.cwd())["VITE_PLAYGROUND_ROOT"];
+	return {
+		plugins: [react()],
+		server: {
+			proxy: {
+				"/playground/api": {
+					target: `https://${playgroundHost}`,
+					changeOrigin: true,
+					rewrite: (path) => path.replace(/^\/playground/, ""),
+				},
 			},
 		},
-	},
+		resolve: {
+			alias: {
+				"react/jsx-runtime.js": "react/jsx-runtime",
+			},
+		},
 
-	appType: "spa",
-	base: "/playground",
+		appType: "spa",
+		base: "/playground",
+		build: {
+			chunkSizeWarningLimit: 1000,
+		},
+	};
 });

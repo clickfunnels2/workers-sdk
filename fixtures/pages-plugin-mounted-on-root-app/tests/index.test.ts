@@ -1,6 +1,6 @@
 import * as path from "path";
 import { fetch } from "undici";
-import { describe, it, beforeAll, afterAll } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import { runWranglerPagesDev } from "../../shared/src/run-wrangler-long-lived";
 
 describe("Pages Functions", () => {
@@ -12,7 +12,7 @@ describe("Pages Functions", () => {
 		({ ip, port, stop } = await runWranglerPagesDev(
 			path.resolve(__dirname, ".."),
 			"public",
-			["--port=0"]
+			["--port=0", "--inspector-port=0"]
 		));
 	});
 

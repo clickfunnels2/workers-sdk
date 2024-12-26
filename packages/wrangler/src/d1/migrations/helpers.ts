@@ -1,10 +1,11 @@
 import fs from "node:fs";
 import path from "path";
+import { configFileName } from "../../config";
 import { confirm } from "../../dialogs";
-import { CI } from "../../is-ci";
-import isInteractive from "../../is-interactive";
+import { UserError } from "../../errors";
+import { isNonInteractiveOrCI } from "../../is-interactive";
 import { logger } from "../../logger";
-import { DEFAULT_MIGRATION_PATH, DEFAULT_BATCH_SIZE } from "../constants";
+import { DEFAULT_MIGRATION_PATH } from "../constants";
 import { executeSql } from "../execute";
 import type { ConfigFields, DevConfig, Environment } from "../../config";
 import type { QueryResult } from "../execute";
@@ -14,17 +15,21 @@ export async function getMigrationsPath({
 	projectPath,
 	migrationsFolderPath,
 	createIfMissing,
+	configPath,
 }: {
 	projectPath: string;
 	migrationsFolderPath: string;
 	createIfMissing: boolean;
+	configPath: string | undefined;
 }): Promise<string> {
 	const dir = path.resolve(projectPath, migrationsFolderPath);
-	if (fs.existsSync(dir)) return dir;
+	if (fs.existsSync(dir)) {
+		return dir;
+	}
 
 	const warning = `No migrations folder found.${
 		migrationsFolderPath === DEFAULT_MIGRATION_PATH
-			? " Set `migrations_dir` in wrangler.toml to choose a different path."
+			? ` Set \`migrations_dir\` in your ${configFileName(configPath)} file to choose a different path.`
 			: ""
 	}`;
 
@@ -35,13 +40,14 @@ export async function getMigrationsPath({
 		logger.warn(warning);
 	}
 
-	throw new Error(`No migrations present at ${dir}.`);
+	throw new UserError(`No migrations present at ${dir}.`);
 }
 
 export async function getUnappliedMigrations({
 	migrationsTableName,
 	migrationsPath,
 	local,
+	remote,
 	config,
 	name,
 	persistTo,
@@ -50,20 +56,22 @@ export async function getUnappliedMigrations({
 	migrationsTableName: string;
 	migrationsPath: string;
 	local: boolean | undefined;
+	remote: boolean | undefined;
 	config: ConfigFields<DevConfig> & Environment;
 	name: string;
 	persistTo: string | undefined;
 	preview: boolean | undefined;
 }): Promise<Array<string>> {
 	const appliedMigrations = (
-		await listAppliedMigrations(
+		await listAppliedMigrations({
 			migrationsTableName,
 			local,
+			remote,
 			config,
 			name,
 			persistTo,
-			preview
-		)
+			preview,
+		})
 	).map((migration) => {
 		return migration.name;
 	});
@@ -80,19 +88,31 @@ export async function getUnappliedMigrations({
 	return unappliedMigrations;
 }
 
-const listAppliedMigrations = async (
-	migrationsTableName: string,
-	local: boolean | undefined,
-	config: ConfigFields<DevConfig> & Environment,
-	name: string,
-	persistTo: string | undefined,
-	preview: boolean | undefined
-): Promise<Migration[]> => {
+type ListAppliedMigrationsProps = {
+	migrationsTableName: string;
+	local: boolean | undefined;
+	remote: boolean | undefined;
+	config: ConfigFields<DevConfig> & Environment;
+	name: string;
+	persistTo: string | undefined;
+	preview: boolean | undefined;
+};
+
+const listAppliedMigrations = async ({
+	migrationsTableName,
+	local,
+	remote,
+	config,
+	name,
+	persistTo,
+	preview,
+}: ListAppliedMigrationsProps): Promise<Migration[]> => {
 	const response: QueryResult[] | null = await executeSql({
 		local,
+		remote,
 		config,
 		name,
-		shouldPrompt: isInteractive() && !CI.isCI(),
+		shouldPrompt: !isNonInteractiveOrCI(),
 		persistTo,
 		command: `SELECT *
 		FROM ${migrationsTableName}
@@ -100,10 +120,11 @@ const listAppliedMigrations = async (
 		file: undefined,
 		json: true,
 		preview,
-		batchSize: DEFAULT_BATCH_SIZE,
 	});
 
-	if (!response || response[0].results.length === 0) return [];
+	if (!response || response[0].results.length === 0) {
+		return [];
+	}
 
 	return response[0].results as Migration[];
 };
@@ -115,7 +136,9 @@ function getMigrationNames(migrationsPath: string): Array<string> {
 
 	let dirent;
 	while ((dirent = dir.readSync()) !== null) {
-		if (dirent.name.endsWith(".sql")) migrations.push(dirent.name);
+		if (dirent.name.endsWith(".sql")) {
+			migrations.push(dirent.name);
+		}
 	}
 
 	dir.closeSync();
@@ -123,16 +146,14 @@ function getMigrationNames(migrationsPath: string): Array<string> {
 	return migrations;
 }
 
+/**
+ * Returns the highest current migration number plus one, ignoring any missing numbers.
+ */
 export function getNextMigrationNumber(migrationsPath: string): number {
-	let highestMigrationNumber = -1;
-
-	for (const migration in getMigrationNames(migrationsPath)) {
-		const migrationNumber = parseInt(migration.split("_")[0]);
-
-		if (migrationNumber > highestMigrationNumber) {
-			highestMigrationNumber = migrationNumber;
-		}
-	}
+	const migrationNumbers = getMigrationNames(migrationsPath).map((migration) =>
+		parseInt(migration.split("_")[0])
+	);
+	const highestMigrationNumber = Math.max(...migrationNumbers, 0);
 
 	return highestMigrationNumber + 1;
 }
@@ -140,6 +161,7 @@ export function getNextMigrationNumber(migrationsPath: string): number {
 export const initMigrationsTable = async ({
 	migrationsTableName,
 	local,
+	remote,
 	config,
 	name,
 	persistTo,
@@ -147,6 +169,7 @@ export const initMigrationsTable = async ({
 }: {
 	migrationsTableName: string;
 	local: boolean | undefined;
+	remote: boolean | undefined;
 	config: ConfigFields<DevConfig> & Environment;
 	name: string;
 	persistTo: string | undefined;
@@ -154,9 +177,10 @@ export const initMigrationsTable = async ({
 }) => {
 	return executeSql({
 		local,
+		remote,
 		config,
 		name,
-		shouldPrompt: isInteractive() && !CI.isCI(),
+		shouldPrompt: !isNonInteractiveOrCI(),
 		persistTo,
 		command: `CREATE TABLE IF NOT EXISTS ${migrationsTableName}(
 		id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -166,6 +190,5 @@ export const initMigrationsTable = async ({
 		file: undefined,
 		json: true,
 		preview,
-		batchSize: DEFAULT_BATCH_SIZE,
 	});
 };

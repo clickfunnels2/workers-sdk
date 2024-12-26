@@ -2,11 +2,7 @@ import assert from "assert";
 import { Blob } from "buffer";
 import fs from "fs/promises";
 import path from "path";
-import type {
-	KVNamespace,
-	KVNamespaceListOptions,
-	KVNamespaceListResult,
-} from "@cloudflare/workers-types/experimental";
+import consumers from "stream/consumers";
 import { Macro, ThrowsExpectation } from "ava";
 import {
 	KV_PLUGIN_NAME,
@@ -15,15 +11,20 @@ import {
 	ReplaceWorkersTypes,
 } from "miniflare";
 import {
+	createJunkStream,
 	FIXTURES_PATH,
 	MiniflareDurableObjectControlStub,
-	MiniflareTestContext,
-	Namespaced,
-	createJunkStream,
 	miniflareTest,
+	MiniflareTestContext,
 	namespace,
+	Namespaced,
 	useTmp,
 } from "../../test-shared";
+import type {
+	KVNamespace,
+	KVNamespaceListOptions,
+	KVNamespaceListResult,
+} from "@cloudflare/workers-types/experimental";
 
 function secondsToMillis(seconds: number): number {
 	return seconds * 1000;
@@ -33,6 +34,18 @@ function secondsToMillis(seconds: number): number {
 export const TIME_NOW = 1000;
 // Expiration value to signal a key that will expire in the future
 export const TIME_FUTURE = 1500;
+
+function sqlStmts(object: MiniflareDurableObjectControlStub) {
+	return {
+		getBlobIdByKey: async (key: string): Promise<string | undefined> => {
+			const rows = await object.sqlQuery<{ blob_id: string }>(
+				"SELECT blob_id FROM _mf_entries WHERE key = ?",
+				key
+			);
+			return rows[0]?.blob_id;
+		},
+	};
+}
 
 interface Context extends MiniflareTestContext {
 	ns: string;
@@ -160,8 +173,11 @@ test("put: puts empty value", async (t) => {
 	t.is(value, "");
 });
 test("put: overrides existing keys", async (t) => {
-	const { kv } = t.context;
+	const { kv, ns, object } = t.context;
+	const stmts = sqlStmts(object);
 	await kv.put("key", "value1");
+	const blobId = await stmts.getBlobIdByKey(`${ns}key`);
+	assert(blobId !== undefined);
 	await kv.put("key", "value2", {
 		expiration: TIME_FUTURE,
 		metadata: { testing: true },
@@ -169,6 +185,15 @@ test("put: overrides existing keys", async (t) => {
 	const result = await kv.getWithMetadata("key");
 	t.is(result.value, "value2");
 	t.deepEqual(result.metadata, { testing: true });
+
+	// Check deletes old blob
+	await object.waitForFakeTasks();
+	t.is(await object.getBlob(blobId), null);
+
+	// Check created new blob
+	const newBlobId = await stmts.getBlobIdByKey(`${ns}key`);
+	assert(newBlobId !== undefined);
+	t.not(blobId, newBlobId);
 });
 test("put: keys are case-sensitive", async (t) => {
 	const { kv } = t.context;
@@ -619,4 +644,44 @@ test("migrates database to new location", async (t) => {
 
 	const namespace = await mf.getKVNamespace("NAMESPACE");
 	t.is(await namespace.get("key"), "value");
+});
+
+test("sticky blobs never deleted", async (t) => {
+	// Checking regular behaviour that old blobs deleted in `put: overrides
+	// existing keys` test. Only testing sticky blobs for KV, as the blob store
+	// should only be constructed in the shared `MiniflareDurableObject` ABC.
+
+	// Create instance with sticky blobs enabled (can't use `t.context.mf`)
+	const mf = new Miniflare({
+		script: "",
+		modules: true,
+		kvNamespaces: ["NAMESPACE"],
+		unsafeStickyBlobs: true,
+	});
+	t.teardown(() => mf.dispose());
+
+	// Create control stub for newly created instance's namespace
+	const objectNamespace = await mf._getInternalDurableObjectNamespace(
+		KV_PLUGIN_NAME,
+		"kv:ns",
+		"KVNamespaceObject"
+	);
+	const objectId = objectNamespace.idFromName("NAMESPACE");
+	const objectStub = objectNamespace.get(objectId);
+	const object = new MiniflareDurableObjectControlStub(objectStub);
+	await object.enableFakeTimers(secondsToMillis(TIME_NOW));
+	const stmts = sqlStmts(object);
+
+	// Store something in the namespace and get the blob ID
+	const ns = await mf.getKVNamespace("NAMESPACE");
+	await ns.put("key", "value 1");
+	const blobId = await stmts.getBlobIdByKey("key");
+	assert(blobId !== undefined);
+
+	// Override key and check we can still access the old blob
+	await ns.put("key", "value 2");
+	await object.waitForFakeTasks();
+	const blob = await object.getBlob(blobId);
+	assert(blob !== null);
+	t.is(await consumers.text(blob), "value 1");
 });

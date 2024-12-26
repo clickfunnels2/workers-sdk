@@ -1,8 +1,5 @@
 import { reinitialiseAuthTokens } from "../../user";
 
-const ORIGINAL_CLOUDFLARE_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN;
-const ORIGINAL_CLOUDFLARE_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID;
-
 /**
  * Mock the API token so that we don't need to read it from user configuration files.
  *
@@ -14,15 +11,15 @@ export function mockApiToken({
 }: { apiToken?: string | null } = {}) {
 	beforeEach(() => {
 		if (apiToken === null) {
+			// stubEnv doesn't support removing env vars
+			// So we fake it by initially stubbing it with an empty string and then deleting it
+			vi.stubEnv("CLOUDFLARE_API_TOKEN", "");
 			delete process.env.CLOUDFLARE_API_TOKEN;
 		} else {
-			process.env.CLOUDFLARE_API_TOKEN = apiToken;
+			vi.stubEnv("CLOUDFLARE_API_TOKEN", apiToken);
 		}
 		// Now we have updated the environment, we must reinitialize the user auth state.
 		reinitialiseAuthTokens();
-	});
-	afterEach(() => {
-		process.env.CLOUDFLARE_API_TOKEN = ORIGINAL_CLOUDFLARE_API_TOKEN;
 	});
 }
 
@@ -35,14 +32,22 @@ export function mockApiToken({
 export function mockAccountId({
 	accountId = "some-account-id",
 }: { accountId?: string | null } = {}) {
+	const ORIGINAL_CLOUDFLARE_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID;
 	beforeEach(() => {
 		if (accountId === null) {
 			delete process.env.CLOUDFLARE_ACCOUNT_ID;
 		} else {
 			process.env.CLOUDFLARE_ACCOUNT_ID = accountId;
 		}
+		// Now we have updated the environment, we must reinitialize the user auth state.
+		reinitialiseAuthTokens();
 	});
 	afterEach(() => {
-		process.env.CLOUDFLARE_ACCOUNT_ID = ORIGINAL_CLOUDFLARE_ACCOUNT_ID;
+		if (ORIGINAL_CLOUDFLARE_ACCOUNT_ID === undefined) {
+			// `process.env`'s assigned property values are coerced to strings
+			delete process.env.CLOUDFLARE_ACCOUNT_ID;
+		} else {
+			process.env.CLOUDFLARE_ACCOUNT_ID = ORIGINAL_CLOUDFLARE_ACCOUNT_ID;
+		}
 	});
 }
