@@ -11,6 +11,7 @@ import type { NodeJSCompatMode } from "miniflare";
 
 export type DevProps = {
 	name: string | undefined;
+	cache: boolean;
 	noBundle: boolean;
 	findAdditionalModules: boolean | undefined;
 	entry: Entry;

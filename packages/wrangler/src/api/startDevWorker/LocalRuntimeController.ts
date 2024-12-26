@@ -85,6 +85,7 @@ export async function convertToConfigBundle(
 
 	return {
 		name: event.config.name,
+		cache: event.config.cache,
 		bundle: event.bundle,
 		format: event.bundle.entry.format,
 		compatibilityDate: event.config.compatibilityDate,

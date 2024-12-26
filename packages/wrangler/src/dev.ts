@@ -81,6 +81,10 @@ export const dev = createCommand({
 			type: "string",
 			requiresArg: true,
 		},
+		cache: {
+			describe: "Enable Cache (default: true)",
+			type: "boolean",
+		},
 		"compatibility-date": {
 			describe: "Date to use for compatibility checks",
 			type: "string",
@@ -530,6 +534,7 @@ async function setupDevEnv(
 	await devEnv.config.set(
 		{
 			name: args.name,
+			cache: args.cache,
 			config: configPath,
 			entrypoint: args.script,
 			compatibilityDate: args.compatibilityDate,

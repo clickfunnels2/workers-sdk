@@ -58,6 +58,8 @@ export interface Worker {
 export interface StartDevWorkerInput {
 	/** The name of the worker. */
 	name?: string;
+
+	cache?: boolean
 	/**
 	 * The javascript or typescript entry-point of the worker.
 	 * This is the `main` property of a Wrangler configuration file.
