@@ -1,8 +1,8 @@
-import { useContext } from "react";
 import { Div } from "@cloudflare/elements";
+import { useContext } from "react";
+import FrameErrorBoundary from "./FrameErrorBoundary";
 import { ServiceContext } from "./QuickEditor";
 import { VSCodeEditor } from "./VSCodeEditor";
-import FrameErrorBoundary from "./FrameErrorBoundary";
 
 export default function EditorPane() {
 	const draftWorker = useContext(ServiceContext);
@@ -18,11 +18,11 @@ export default function EditorPane() {
 									name: "workers-playground",
 									entrypoint: draftWorker?.service?.entrypoint,
 									files: draftWorker?.service?.modules,
-							  }
+								}
 							: undefined
 					}
 					onChange={({ entrypoint, files }) =>
-						draftWorker.preview({ entrypoint, modules: files })
+						draftWorker.updateDraft({ entrypoint, modules: files })
 					}
 				/>
 			</FrameErrorBoundary>

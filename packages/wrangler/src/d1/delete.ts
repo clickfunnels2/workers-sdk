@@ -1,10 +1,11 @@
+import { printWranglerBanner } from "..";
 import { fetchResult } from "../cfetch";
 import { withConfig } from "../config";
 import { confirm } from "../dialogs";
 import { logger } from "../logger";
 import { requireAuth } from "../user";
 import { Name } from "./options";
-import { d1BetaWarning, getDatabaseByNameOrBinding } from "./utils";
+import { getDatabaseByNameOrBinding } from "./utils";
 import type {
 	CommonYargsArgv,
 	StrictYargsOptionsToInterface,
@@ -12,18 +13,17 @@ import type {
 import type { Database } from "./types";
 
 export function Options(d1ListYargs: CommonYargsArgv) {
-	return Name(d1ListYargs)
-		.option("skip-confirmation", {
-			describe: "Skip confirmation",
-			type: "boolean",
-			alias: "y",
-			default: false,
-		})
-		.epilogue(d1BetaWarning);
+	return Name(d1ListYargs).option("skip-confirmation", {
+		describe: "Skip confirmation",
+		type: "boolean",
+		alias: "y",
+		default: false,
+	});
 }
 type HandlerOptions = StrictYargsOptionsToInterface<typeof Options>;
 export const Handler = withConfig<HandlerOptions>(
 	async ({ name, skipConfirmation, config }): Promise<void> => {
+		await printWranglerBanner();
 		const accountId = await requireAuth(config);
 
 		const db: Database = await getDatabaseByNameOrBinding(

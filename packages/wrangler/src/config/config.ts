@@ -4,7 +4,7 @@ import type { CamelCaseKey } from "yargs";
 /**
  * This is the static type definition for the configuration object.
  *
- * It reflects a normalized and validated version of the configuration that you can write in wrangler.toml,
+ * It reflects a normalized and validated version of the configuration that you can write in a Wrangler configuration file,
  * and optionally augment with arguments passed directly to wrangler.
  *
  * For more information about the configuration object, see the
@@ -14,19 +14,21 @@ import type { CamelCaseKey } from "yargs";
  *
  * - Fields that are only specified in `ConfigFields` and not `Environment` can only appear
  * in the top level config and should not appear in any environments.
- * - All top level fields in config and environments are optional in the wrangler.toml file.
+ * - Fields that are specified in `PagesConfigFields` are only relevant for Pages projects
+ * - All top level fields in config and environments are optional in the Wrangler configuration file.
  *
  * Legend for the annotations:
  *
  * - `@breaking`: the deprecation/optionality is a breaking change from Wrangler v1.
  * - `@todo`: there's more work to be done (with details attached).
  */
-export type Config = ConfigFields<DevConfig> & Environment;
+export type Config = ConfigFields<DevConfig> & PagesConfigFields & Environment;
 
 export type RawConfig = Partial<ConfigFields<RawDevConfig>> &
+	PagesConfigFields &
 	RawEnvironment &
 	DeprecatedConfigFields &
-	EnvironmentMap;
+	EnvironmentMap & { $schema?: string };
 
 export interface ConfigFields<Dev extends RawDevConfig> {
 	configPath: string | undefined;
@@ -53,29 +55,6 @@ export interface ConfigFields<Dev extends RawDevConfig> {
 	dev: Dev;
 
 	/**
-	 * A list of migrations that should be uploaded with your Worker.
-	 *
-	 * These define changes in your Durable Object declarations.
-	 *
-	 * More details at https://developers.cloudflare.com/workers/learning/using-durable-objects#configuring-durable-object-classes-with-migrations
-	 *
-	 * @default `[]`
-	 */
-	migrations: {
-		/** A unique identifier for this migration. */
-		tag: string;
-		/** The new Durable Objects being defined. */
-		new_classes?: string[];
-		/** The Durable Objects being renamed. */
-		renamed_classes?: {
-			from: string;
-			to: string;
-		}[];
-		/** The Durable Objects being removed. */
-		deleted_classes?: string[];
-	}[];
-
-	/**
 	 * The definition of a Worker Site, a feature that lets you upload
 	 * static assets with your Worker.
 	 *
@@ -86,7 +65,7 @@ export interface ConfigFields<Dev extends RawDevConfig> {
 				/**
 				 * The directory containing your static assets.
 				 *
-				 * It must be a path relative to your wrangler.toml file.
+				 * It must be a path relative to your Wrangler configuration file.
 				 * Example: bucket = "./public"
 				 *
 				 * If there is a `site` field then it must contain this `bucket` field.
@@ -107,7 +86,7 @@ export interface ConfigFields<Dev extends RawDevConfig> {
 				 * items will be uploaded. Example: include = ["upload_dir"]
 				 *
 				 * @optional
-				 * @default `[]`
+				 * @default []
 				 */
 				include?: string[];
 
@@ -117,17 +96,20 @@ export interface ConfigFields<Dev extends RawDevConfig> {
 				 * uploads. Example: exclude = ["ignore_dir"]
 				 *
 				 * @optional
-				 * @default `[]`
+				 * @default []
 				 */
 				exclude?: string[];
 		  }
 		| undefined;
 
 	/**
-	 * Serve a folder of static assets with your Worker, without any additional code.
-	 * This can either be a string, or an object with additional config fields.
+	 * Old behaviour of serving a folder of static assets with your Worker,
+	 * without any additional code.
+	 * This can either be a string, or an object with additional config
+	 * fields.
+	 * Will be deprecated in the near future in favor of `assets`.
 	 */
-	assets:
+	legacy_assets:
 		| {
 				bucket: string;
 				include: string[];
@@ -135,6 +117,7 @@ export interface ConfigFields<Dev extends RawDevConfig> {
 				browser_TTL: number | undefined;
 				serve_single_page_app: boolean;
 		  }
+		| string
 		| undefined;
 
 	/**
@@ -171,7 +154,13 @@ export interface ConfigFields<Dev extends RawDevConfig> {
 		| undefined;
 
 	/**
-	 * By default, wrangler.toml is the source of truth for your environment configuration, like a terraform file.
+	 * A map of module aliases. Lets you swap out a module for any others.
+	 * Corresponds with esbuild's `alias` config
+	 */
+	alias: { [key: string]: string } | undefined;
+
+	/**
+	 * By default, the Wrangler configuration file is the source of truth for your environment configuration, like a terraform file.
 	 *
 	 * If you change your vars in the dashboard, wrangler *will* override/delete them on its next deploy.
 	 *
@@ -183,43 +172,54 @@ export interface ConfigFields<Dev extends RawDevConfig> {
 	keep_vars?: boolean;
 }
 
+// Pages-specific configuration fields
+interface PagesConfigFields {
+	/**
+	 * The directory of static assets to serve.
+	 *
+	 * The presence of this field in a Wrangler configuration file indicates a Pages project,
+	 * and will prompt the handling of the configuration file according to the
+	 * Pages-specific validation rules.
+	 */
+	pages_build_output_dir?: string;
+}
+
 export interface DevConfig {
 	/**
 	 * IP address for the local dev server to listen on,
 	 *
-	 * @default `*`
+	 * @default localhost
 	 */
 	ip: string;
 
 	/**
 	 * Port for the local dev server to listen on
 	 *
-	 * @default `8787`
+	 * @default 8787
 	 */
 	port: number | undefined;
 
 	/**
 	 * Port for the local dev server's inspector to listen on
 	 *
-	 * @default `9229`
+	 * @default 9229
 	 */
 	inspector_port: number | undefined;
 
 	/**
 	 * Protocol that local wrangler dev server listens to requests on.
 	 *
-	 * @default `http`
+	 * @default http
 	 */
 	local_protocol: "http" | "https";
 
 	/**
 	 * Protocol that wrangler dev forwards requests on
 	 *
-	 * Setting this to `http` is not currently implemented.
+	 * Setting this to `http` is not currently implemented for remote mode.
 	 * See https://github.com/cloudflare/workers-sdk/issues/583
 	 *
-	 * @default `https`
-	 * @todo this needs to be implemented https://github.com/cloudflare/workers-sdk/issues/583
+	 * @default https
 	 */
 	upstream_protocol: "https" | "http";
 
@@ -231,7 +231,7 @@ export interface DevConfig {
 
 export type RawDevConfig = Partial<DevConfig>;
 
-export interface DeprecatedConfigFields {
+interface DeprecatedConfigFields {
 	/**
 	 * The project "type". A holdover from Wrangler v1.x.
 	 * Valid values were "webpack", "javascript", and "rust".
@@ -268,7 +268,7 @@ interface EnvironmentMap {
 	 *
 	 * For more information, see the documentation at https://developers.cloudflare.com/workers/cli-wrangler/configuration#environments
 	 *
-	 * @default `{}`
+	 * @default {}
 	 */
 	env?: {
 		[envName: string]: RawEnvironment;
@@ -279,4 +279,103 @@ interface EnvironmentMap {
 // only camel-cased keys are used
 export type OnlyCamelCase<T = Record<string, never>> = {
 	[key in keyof T as CamelCaseKey<key>]: T[key];
+};
+
+export const defaultWranglerConfig: Config = {
+	/*====================================================*/
+	/*      Fields supported by both Workers & Pages      */
+	/*====================================================*/
+	/* TOP-LEVEL ONLY FIELDS */
+	pages_build_output_dir: undefined,
+	send_metrics: undefined,
+	dev: {
+		ip: process.platform === "win32" ? "127.0.0.1" : "localhost",
+		port: undefined, // the default of 8787 is set at runtime
+		inspector_port: undefined, // the default of 9229 is set at runtime
+		local_protocol: "http",
+		upstream_protocol: "http",
+		host: undefined,
+	},
+
+	/** INHERITABLE ENVIRONMENT FIELDS **/
+	name: undefined,
+	compatibility_date: undefined,
+	compatibility_flags: [],
+	limits: undefined,
+	placement: undefined,
+
+	/** NON-INHERITABLE ENVIRONMENT FIELDS **/
+	vars: {},
+	durable_objects: { bindings: [] },
+	kv_namespaces: [],
+	queues: {
+		producers: [],
+		consumers: [], // WORKERS SUPPORT ONLY!!
+	},
+	r2_buckets: [],
+	d1_databases: [],
+	vectorize: [],
+	hyperdrive: [],
+	workflows: [],
+	services: [],
+	analytics_engine_datasets: [],
+	ai: undefined,
+	version_metadata: undefined,
+
+	/*====================================================*/
+	/*           Fields supported by Workers only         */
+	/*====================================================*/
+	/* TOP-LEVEL ONLY FIELDS */
+	configPath: undefined,
+	legacy_env: true,
+	site: undefined,
+	legacy_assets: undefined,
+	wasm_modules: undefined,
+	text_blobs: undefined,
+	data_blobs: undefined,
+	keep_vars: undefined,
+	alias: undefined,
+
+	/** INHERITABLE ENVIRONMENT FIELDS **/
+	account_id: undefined,
+	main: undefined,
+	find_additional_modules: undefined,
+	preserve_file_names: undefined,
+	base_dir: undefined,
+	workers_dev: undefined,
+	preview_urls: true,
+	route: undefined,
+	routes: undefined,
+	tsconfig: undefined,
+	jsx_factory: "React.createElement",
+	jsx_fragment: "React.Fragment",
+	migrations: [],
+	triggers: {
+		crons: [],
+	},
+	usage_model: undefined,
+	rules: [],
+	build: { command: undefined, watch_dir: "./src", cwd: undefined },
+	no_bundle: undefined,
+	minify: undefined,
+	node_compat: undefined,
+	dispatch_namespaces: [],
+	first_party_worker: undefined,
+	zone_id: undefined,
+	logfwdr: { bindings: [] },
+	logpush: undefined,
+	upload_source_maps: undefined,
+	assets: undefined,
+	observability: { enabled: true },
+
+	/** NON-INHERITABLE ENVIRONMENT FIELDS **/
+	define: {},
+	cloudchamber: {},
+	containers: { app: [] },
+	send_email: [],
+	browser: undefined,
+	unsafe: {},
+	mtls_certificates: [],
+	tail_consumers: undefined,
+	pipelines: [],
 };

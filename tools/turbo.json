@@ -1,0 +1,17 @@
+{
+	"$schema": "http://turbo.build/schema.json",
+	"extends": ["//"],
+	"tasks": {
+		"test:ci": {
+			"inputs": ["../packages/*/package.json"],
+			"dependsOn": ["build"]
+		},
+		"build": {
+			"env": [
+				"CLOUDFLARE_API_TOKEN",
+				"PUBLISHED_PACKAGES",
+				"CLOUDFLARE_ACCOUNT_ID"
+			]
+		}
+	}
+}

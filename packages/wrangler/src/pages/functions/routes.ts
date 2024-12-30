@@ -1,9 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { UserError } from "../../errors";
 import { isValidIdentifier, normalizeIdentifier } from "./identifiers";
 import type { UrlPath } from "../../paths";
 
-export const HTTP_METHODS = [
+const HTTP_METHODS = [
 	"HEAD",
 	"OPTIONS",
 	"GET",
@@ -12,9 +13,9 @@ export const HTTP_METHODS = [
 	"PATCH",
 	"DELETE",
 ] as const;
-export type HTTPMethod = typeof HTTP_METHODS[number];
+export type HTTPMethod = (typeof HTTP_METHODS)[number];
 
-export type RoutesCollection = Array<{
+type RoutesCollection = Array<{
 	routePath: UrlPath;
 	mountPath: UrlPath;
 	method?: HTTPMethod;
@@ -63,7 +64,7 @@ export async function writeRoutesModule({
 	return outfile;
 }
 
-export function parseConfig(config: Config, baseDir: string) {
+function parseConfig(config: Config, baseDir: string) {
 	const routes: RoutesCollection = [];
 	const importMap: ImportMap = new Map();
 	const identifierCount = new Map<string, number>(); // to keep track of identifier collisions
@@ -85,12 +86,12 @@ export function parseConfig(config: Config, baseDir: string) {
 
 			// ensure the filepath isn't attempting to resolve to anything outside of the project
 			if (path.relative(baseDir, resolvedPath).startsWith("..")) {
-				throw new Error(`Invalid module path "${filepath}"`);
+				throw new UserError(`Invalid module path "${filepath}"`);
 			}
 
 			// ensure the module name (if provided) is a valid identifier to guard against injection attacks
 			if (name !== "default" && !isValidIdentifier(name)) {
-				throw new Error(`Invalid module identifier "${name}"`);
+				throw new UserError(`Invalid module identifier "${name}"`);
 			}
 
 			if (!identifier) {
@@ -124,10 +125,7 @@ export function parseConfig(config: Config, baseDir: string) {
 	return { routes, importMap };
 }
 
-export function generateRoutesModule(
-	importMap: ImportMap,
-	routes: RoutesCollection
-) {
+function generateRoutesModule(importMap: ImportMap, routes: RoutesCollection) {
 	return `${[...importMap.values()]
 		.map(
 			({ filepath, name, identifier }) =>

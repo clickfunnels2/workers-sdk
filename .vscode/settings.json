@@ -2,6 +2,9 @@
 	"editor.defaultFormatter": "esbenp.prettier-vscode",
 	"cSpell.words": [
 		"Abortable",
+		"assetsignore",
+		"astro",
+		"cf-typegen",
 		"cfetch",
 		"chatgpt",
 		"clipboardy",
@@ -11,8 +14,10 @@
 		"esbuild",
 		"eslintcache",
 		"execa",
+		"filestat",
 		"haikunate",
 		"haikunator",
+		"Hono",
 		"httplogs",
 		"iarna",
 		"isolinear",
@@ -24,11 +29,15 @@
 		"mockpm",
 		"mrbbot",
 		"mtls",
+		"nodeless",
+		"Nuxt",
 		"outdir",
 		"outfile",
 		"pgrep",
 		"PKCE",
 		"Positionals",
+		"qwik",
+		"Redistributable",
 		"reinitialise",
 		"scandir",
 		"selfsigned",
@@ -36,6 +45,7 @@
 		"tsbuildinfo",
 		"turborepo",
 		"undici",
+		"unenv",
 		"unrevoke",
 		"Untriaged",
 		"versionless",
@@ -46,7 +56,6 @@
 		"websockets",
 		"workerd",
 		"xxhash",
-		"workerd",
 		"zjcompt"
 	],
 	"cSpell.ignoreWords": [
@@ -59,7 +68,6 @@
 	"eslint.runtime": "node",
 	"files.trimTrailingWhitespace": true,
 	"typescript.tsdk": "node_modules/typescript/lib",
-	"editor.tabSize": 2,
 	"files.associations": {
 		"api-extractor.json": "jsonc",
 		"CODEOWNERS": "plaintext",
@@ -68,5 +76,16 @@
 	},
 	"[html]": {
 		"editor.defaultFormatter": "esbenp.prettier-vscode"
-	}
+	},
+	"[typescript]": {
+		"editor.defaultFormatter": "esbenp.prettier-vscode"
+	},
+	"[ignore]": {
+		"editor.defaultFormatter": "foxundermoon.shell-format"
+	},
+	"eslint.workingDirectories": [
+		{
+			"mode": "auto"
+		}
+	]
 }

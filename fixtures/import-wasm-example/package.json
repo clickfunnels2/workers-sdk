@@ -1,22 +1,26 @@
 {
 	"name": "import-wasm-example",
-	"version": "1.0.1",
 	"private": true,
 	"description": "",
 	"author": "",
 	"main": "src/index.js",
 	"scripts": {
 		"check:type": "tsc",
-		"test": "vitest run",
+		"test:ci": "vitest run",
 		"test:watch": "vitest",
 		"type:tests": "tsc -p ./tests/tsconfig.json"
 	},
-	"devDependencies": {
-		"undici": "^5.9.1",
-		"wrangler": "workspace:*",
-		"@cloudflare/workers-tsconfig": "workspace:^"
-	},
 	"dependencies": {
 		"import-wasm-static": "workspace:^"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-tsconfig": "workspace:^",
+		"typescript": "catalog:default",
+		"undici": "catalog:default",
+		"vitest": "catalog:default",
+		"wrangler": "workspace:*"
+	},
+	"volta": {
+		"extends": "../../package.json"
 	}
 }

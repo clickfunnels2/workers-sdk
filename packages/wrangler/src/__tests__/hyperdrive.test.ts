@@ -1,4 +1,5 @@
-import { rest } from "msw";
+import { http, HttpResponse } from "msw";
+import { vi } from "vitest";
 import { endEventLoop } from "./helpers/end-event-loop";
 import { mockAccountId, mockApiToken } from "./helpers/mock-account-id";
 import { mockConsoleMethods } from "./helpers/mock-console";
@@ -7,6 +8,12 @@ import { useMockIsTTY } from "./helpers/mock-istty";
 import { createFetchResult, msw } from "./helpers/msw";
 import { runInTempDir } from "./helpers/run-in-tmp";
 import { runWrangler } from "./helpers/run-wrangler";
+import { writeWranglerConfig } from "./helpers/write-wrangler-config";
+import type {
+	CreateUpdateHyperdriveBody,
+	HyperdriveConfig,
+	PatchHyperdriveBody,
+} from "../hyperdrive/client";
 
 describe("hyperdrive help", () => {
 	const std = mockConsoleMethods();
@@ -18,30 +25,23 @@ describe("hyperdrive help", () => {
 
 		expect(std.err).toMatchInlineSnapshot(`""`);
 		expect(std.out).toMatchInlineSnapshot(`
-		"wrangler hyperdrive
+			"wrangler hyperdrive
 
-		🚀 Configure Hyperdrive databases
+			🚀 Manage Hyperdrive databases
 
-		Commands:
-		  wrangler hyperdrive create <name>  Create a Hyperdrive config
-		  wrangler hyperdrive delete <id>    Delete a Hyperdrive config
-		  wrangler hyperdrive get <id>       Get a Hyperdrive config
-		  wrangler hyperdrive list           List Hyperdrive configs
-		  wrangler hyperdrive update <id>    Update a Hyperdrive config
+			COMMANDS
+			  wrangler hyperdrive create <name>  Create a Hyperdrive config
+			  wrangler hyperdrive delete <id>    Delete a Hyperdrive config
+			  wrangler hyperdrive get <id>       Get a Hyperdrive config
+			  wrangler hyperdrive list           List Hyperdrive configs
+			  wrangler hyperdrive update <id>    Update a Hyperdrive config
 
-		Flags:
-		  -j, --experimental-json-config  Experimental: Support wrangler.json  [boolean]
-		  -c, --config                    Path to .toml configuration file  [string]
-		  -e, --env                       Environment to use for operations and .env files  [string]
-		  -h, --help                      Show help  [boolean]
-		  -v, --version                   Show version number  [boolean]
-
-		--------------------
-		📣 Hyperdrive is currently in open beta
-		📣 Please report any bugs to https://github.com/cloudflare/workers-sdk/issues/new/choose
-		📣 To give feedback, visit https://discord.gg/cloudflaredev
-		--------------------"
-	`);
+			GLOBAL FLAGS
+			  -c, --config   Path to Wrangler configuration file  [string]
+			  -e, --env      Environment to use for operations and .env files  [string]
+			  -h, --help     Show help  [boolean]
+			  -v, --version  Show version number  [boolean]"
+		`);
 	});
 
 	it("should show help when an invalid argument is pased", async () => {
@@ -55,31 +55,24 @@ describe("hyperdrive help", () => {
 		"
 	`);
 		expect(std.out).toMatchInlineSnapshot(`
-		"
-		wrangler hyperdrive
+			"
+			wrangler hyperdrive
 
-		🚀 Configure Hyperdrive databases
+			🚀 Manage Hyperdrive databases
 
-		Commands:
-		  wrangler hyperdrive create <name>  Create a Hyperdrive config
-		  wrangler hyperdrive delete <id>    Delete a Hyperdrive config
-		  wrangler hyperdrive get <id>       Get a Hyperdrive config
-		  wrangler hyperdrive list           List Hyperdrive configs
-		  wrangler hyperdrive update <id>    Update a Hyperdrive config
+			COMMANDS
+			  wrangler hyperdrive create <name>  Create a Hyperdrive config
+			  wrangler hyperdrive delete <id>    Delete a Hyperdrive config
+			  wrangler hyperdrive get <id>       Get a Hyperdrive config
+			  wrangler hyperdrive list           List Hyperdrive configs
+			  wrangler hyperdrive update <id>    Update a Hyperdrive config
 
-		Flags:
-		  -j, --experimental-json-config  Experimental: Support wrangler.json  [boolean]
-		  -c, --config                    Path to .toml configuration file  [string]
-		  -e, --env                       Environment to use for operations and .env files  [string]
-		  -h, --help                      Show help  [boolean]
-		  -v, --version                   Show version number  [boolean]
-
-		--------------------
-		📣 Hyperdrive is currently in open beta
-		📣 Please report any bugs to https://github.com/cloudflare/workers-sdk/issues/new/choose
-		📣 To give feedback, visit https://discord.gg/cloudflaredev
-		--------------------"
-	`);
+			GLOBAL FLAGS
+			  -c, --config   Path to Wrangler configuration file  [string]
+			  -e, --env      Environment to use for operations and .env files  [string]
+			  -h, --help     Show help  [boolean]
+			  -v, --version  Show version number  [boolean]"
+		`);
 	});
 });
 
@@ -93,7 +86,7 @@ describe("hyperdrive commands", () => {
 
 	beforeEach(() => {
 		// @ts-expect-error we're using a very simple setTimeout mock here
-		jest.spyOn(global, "setTimeout").mockImplementation((fn, _period) => {
+		vi.spyOn(global, "setTimeout").mockImplementation((fn, _period) => {
 			setImmediate(fn);
 		});
 		setIsTTY(true);
@@ -104,195 +97,913 @@ describe("hyperdrive commands", () => {
 	});
 
 	it("should handle creating a hyperdrive config", async () => {
-		mockHyperdriveRequest();
+		const reqProm = mockHyperdriveCreate();
 		await runWrangler(
-			"hyperdrive create test123 --connection-string='postgresql://test:password@foo.us-east-2.aws.neon.tech:12345/neondb'"
+			"hyperdrive create test123 --connection-string='postgresql://test:password@example.com:12345/neondb'"
 		);
+
+		await expect(reqProm).resolves.toMatchInlineSnapshot(`
+			Object {
+			  "name": "test123",
+			  "origin": Object {
+			    "database": "neondb",
+			    "host": "example.com",
+			    "password": "password",
+			    "port": 12345,
+			    "scheme": "postgresql",
+			    "user": "test",
+			  },
+			}
+		`);
+
 		expect(std.out).toMatchInlineSnapshot(`
-		"🚧 Creating 'test123'
-		✅ Created new Hyperdrive config
-		 {
-		  \\"id\\": \\"7a040c1eee714e91a30ea6707a2d125c\\",
-		  \\"name\\": \\"test123\\",
-		  \\"origin\\": {
-		    \\"host\\": \\"foo.us-east-2.aws.neon.tech\\",
-		    \\"port\\": 12345,
-		    \\"database\\": \\"neondb\\",
-		    \\"user\\": \\"test\\"
-		  },
-		  \\"caching\\": {
-		    \\"disabled\\": false
-		  }
-		}"
-	`);
+			"🚧 Creating 'test123'
+			✅ Created new Hyperdrive config: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+			📋 To start using your config from a Worker, add the following binding configuration to your Wrangler configuration file:
+
+			{
+			  \\"hyperdrive\\": [
+			    {
+			      \\"binding\\": \\"HYPERDRIVE\\",
+			      \\"id\\": \\"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\\"
+			    }
+			  ]
+			}"
+		`);
+	});
+
+	it("should handle creating a hyperdrive and printing a TOML snipped", async () => {
+		const reqProm = mockHyperdriveCreate();
+		writeWranglerConfig();
+		await runWrangler(
+			"hyperdrive create test123 --connection-string='postgresql://test:password@example.com:12345/neondb'"
+		);
+
+		await expect(reqProm).resolves.toMatchInlineSnapshot(`
+			Object {
+			  "name": "test123",
+			  "origin": Object {
+			    "database": "neondb",
+			    "host": "example.com",
+			    "password": "password",
+			    "port": 12345,
+			    "scheme": "postgresql",
+			    "user": "test",
+			  },
+			}
+		`);
+
+		expect(std.out).toMatchInlineSnapshot(`
+			"🚧 Creating 'test123'
+			✅ Created new Hyperdrive config: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+			📋 To start using your config from a Worker, add the following binding configuration to your wrangler.toml file:
+
+			[[hyperdrive]]
+			binding = \\"HYPERDRIVE\\"
+			id = \\"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\\"
+			"
+		`);
 	});
 
 	it("should handle creating a hyperdrive config for postgres without a port specified", async () => {
-		mockHyperdriveRequest();
+		const reqProm = mockHyperdriveCreate();
 		await runWrangler(
-			"hyperdrive create test123 --connection-string='postgresql://test:password@foo.us-east-2.aws.neon.tech/neondb'"
+			"hyperdrive create test123 --connection-string='postgresql://test:password@example.com/neondb'"
 		);
+
+		await expect(reqProm).resolves.toMatchInlineSnapshot(`
+			Object {
+			  "name": "test123",
+			  "origin": Object {
+			    "database": "neondb",
+			    "host": "example.com",
+			    "password": "password",
+			    "port": 5432,
+			    "scheme": "postgresql",
+			    "user": "test",
+			  },
+			}
+		`);
 		expect(std.out).toMatchInlineSnapshot(`
-		"🚧 Creating 'test123'
-		✅ Created new Hyperdrive config
-		 {
-		  \\"id\\": \\"7a040c1eee714e91a30ea6707a2d125c\\",
-		  \\"name\\": \\"test123\\",
-		  \\"origin\\": {
-		    \\"host\\": \\"foo.us-east-2.aws.neon.tech\\",
-		    \\"port\\": 5432,
-		    \\"database\\": \\"neondb\\",
-		    \\"user\\": \\"test\\"
-		  },
-		  \\"caching\\": {
-		    \\"disabled\\": false
-		  }
-		}"
-	`);
+			"🚧 Creating 'test123'
+			✅ Created new Hyperdrive config: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+			📋 To start using your config from a Worker, add the following binding configuration to your Wrangler configuration file:
+
+			{
+			  \\"hyperdrive\\": [
+			    {
+			      \\"binding\\": \\"HYPERDRIVE\\",
+			      \\"id\\": \\"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\\"
+			    }
+			  ]
+			}"
+		`);
+	});
+
+	it("should handle creating a hyperdrive config with caching options", async () => {
+		const reqProm = mockHyperdriveCreate();
+		await runWrangler(
+			"hyperdrive create test123 --connection-string='postgresql://test:password@example.com:12345/neondb' --max-age=30 --swr=15"
+		);
+
+		await expect(reqProm).resolves.toMatchInlineSnapshot(`
+			Object {
+			  "caching": Object {
+			    "max_age": 30,
+			    "stale_while_revalidate": 15,
+			  },
+			  "name": "test123",
+			  "origin": Object {
+			    "database": "neondb",
+			    "host": "example.com",
+			    "password": "password",
+			    "port": 12345,
+			    "scheme": "postgresql",
+			    "user": "test",
+			  },
+			}
+		`);
+		expect(std.out).toMatchInlineSnapshot(`
+			"🚧 Creating 'test123'
+			✅ Created new Hyperdrive config: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+			📋 To start using your config from a Worker, add the following binding configuration to your Wrangler configuration file:
+
+			{
+			  \\"hyperdrive\\": [
+			    {
+			      \\"binding\\": \\"HYPERDRIVE\\",
+			      \\"id\\": \\"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\\"
+			    }
+			  ]
+			}"
+		`);
+	});
+
+	it("should handle creating a hyperdrive config if the user is URL encoded", async () => {
+		const reqProm = mockHyperdriveCreate();
+		await runWrangler(
+			"hyperdrive create test123 --connection-string='postgresql://user%3Aname:password@example.com/neondb'"
+		);
+
+		await expect(reqProm).resolves.toMatchInlineSnapshot(`
+			Object {
+			  "name": "test123",
+			  "origin": Object {
+			    "database": "neondb",
+			    "host": "example.com",
+			    "password": "password",
+			    "port": 5432,
+			    "scheme": "postgresql",
+			    "user": "user:name",
+			  },
+			}
+		`);
+		expect(std.out).toMatchInlineSnapshot(`
+			"🚧 Creating 'test123'
+			✅ Created new Hyperdrive config: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+			📋 To start using your config from a Worker, add the following binding configuration to your Wrangler configuration file:
+
+			{
+			  \\"hyperdrive\\": [
+			    {
+			      \\"binding\\": \\"HYPERDRIVE\\",
+			      \\"id\\": \\"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\\"
+			    }
+			  ]
+			}"
+		`);
+	});
+
+	it("should handle creating a hyperdrive config if the password is URL encoded", async () => {
+		const reqProm = mockHyperdriveCreate();
+		await runWrangler(
+			"hyperdrive create test123 --connection-string='postgresql://test:a%23%3F81n%287@example.com/neondb'"
+		);
+
+		await expect(reqProm).resolves.toMatchInlineSnapshot(`
+			Object {
+			  "name": "test123",
+			  "origin": Object {
+			    "database": "neondb",
+			    "host": "example.com",
+			    "password": "a#?81n(7",
+			    "port": 5432,
+			    "scheme": "postgresql",
+			    "user": "test",
+			  },
+			}
+		`);
+		expect(std.out).toMatchInlineSnapshot(`
+			"🚧 Creating 'test123'
+			✅ Created new Hyperdrive config: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+			📋 To start using your config from a Worker, add the following binding configuration to your Wrangler configuration file:
+
+			{
+			  \\"hyperdrive\\": [
+			    {
+			      \\"binding\\": \\"HYPERDRIVE\\",
+			      \\"id\\": \\"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\\"
+			    }
+			  ]
+			}"
+		`);
+	});
+
+	it("should handle creating a hyperdrive config if the database name is URL encoded", async () => {
+		const reqProm = mockHyperdriveCreate();
+		await runWrangler(
+			"hyperdrive create test123 --connection-string='postgresql://test:password@example.com/%22weird%22%20dbname'"
+		);
+
+		await expect(reqProm).resolves.toMatchInlineSnapshot(`
+			Object {
+			  "name": "test123",
+			  "origin": Object {
+			    "database": "\\"weird\\" dbname",
+			    "host": "example.com",
+			    "password": "password",
+			    "port": 5432,
+			    "scheme": "postgresql",
+			    "user": "test",
+			  },
+			}
+		`);
+		expect(std.out).toMatchInlineSnapshot(`
+			"🚧 Creating 'test123'
+			✅ Created new Hyperdrive config: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+			📋 To start using your config from a Worker, add the following binding configuration to your Wrangler configuration file:
+
+			{
+			  \\"hyperdrive\\": [
+			    {
+			      \\"binding\\": \\"HYPERDRIVE\\",
+			      \\"id\\": \\"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\\"
+			    }
+			  ]
+			}"
+		`);
+	});
+
+	it("should create a hyperdrive config given individual params instead of a connection string without a scheme set", async () => {
+		const reqProm = mockHyperdriveCreate();
+		await runWrangler(
+			"hyperdrive create test123 --host=example.com --database=neondb --user=test --password=password --port=5432"
+		);
+
+		await expect(reqProm).resolves.toMatchInlineSnapshot(`
+			Object {
+			  "name": "test123",
+			  "origin": Object {
+			    "database": "neondb",
+			    "host": "example.com",
+			    "password": "password",
+			    "port": 5432,
+			    "scheme": "postgresql",
+			    "user": "test",
+			  },
+			}
+		`);
+		expect(std.out).toMatchInlineSnapshot(`
+			"🚧 Creating 'test123'
+			✅ Created new Hyperdrive config: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+			📋 To start using your config from a Worker, add the following binding configuration to your Wrangler configuration file:
+
+			{
+			  \\"hyperdrive\\": [
+			    {
+			      \\"binding\\": \\"HYPERDRIVE\\",
+			      \\"id\\": \\"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\\"
+			    }
+			  ]
+			}"
+		`);
+	});
+
+	it("should create a hyperdrive config given individual params instead of a connection string", async () => {
+		const reqProm = mockHyperdriveCreate();
+		await runWrangler(
+			"hyperdrive create test123 --host=example.com --database=neondb --user=test --password=password --port=1234"
+		);
+
+		await expect(reqProm).resolves.toMatchInlineSnapshot(`
+			Object {
+			  "name": "test123",
+			  "origin": Object {
+			    "database": "neondb",
+			    "host": "example.com",
+			    "password": "password",
+			    "port": 1234,
+			    "scheme": "postgresql",
+			    "user": "test",
+			  },
+			}
+		`);
+		expect(std.out).toMatchInlineSnapshot(`
+			"🚧 Creating 'test123'
+			✅ Created new Hyperdrive config: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+			📋 To start using your config from a Worker, add the following binding configuration to your Wrangler configuration file:
+
+			{
+			  \\"hyperdrive\\": [
+			    {
+			      \\"binding\\": \\"HYPERDRIVE\\",
+			      \\"id\\": \\"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\\"
+			    }
+			  ]
+			}"
+		`);
+	});
+
+	it("should reject a create hyperdrive command if individual params are empty strings", async () => {
+		await expect(() =>
+			runWrangler(
+				"hyperdrive create test123 --host='' --port=5432 --database=foo --user=test --password=foo"
+			)
+		).rejects.toThrow();
+		expect(std.err).toMatchInlineSnapshot(`
+			"[31mX [41;31m[[41;97mERROR[41;31m][0m [1mYou must provide an origin hostname for the database[0m
+
+			"
+		`);
+	});
+
+	it("should reject a create hyperdrive command if both connection string and individual origin params are provided", async () => {
+		await expect(() =>
+			runWrangler(
+				"hyperdrive create test123 --connection-string='postgresql://test:password@example.com/neondb' --host=example.com --port=5432 --database=neondb --user=test --password=foo"
+			)
+		).rejects.toThrow();
+		expect(std.err).toMatchInlineSnapshot(`
+			"[31mX [41;31m[[41;97mERROR[41;31m][0m [1mArguments origin-host and connection-string are mutually exclusive[0m
+
+			"
+		`);
+	});
+
+	it("should create a hyperdrive over access config given the right params", async () => {
+		const reqProm = mockHyperdriveCreate();
+		await runWrangler(
+			"hyperdrive create test123 --host=example.com --database=neondb --user=test --password=password --access-client-id=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.access --access-client-secret=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+		);
+		await expect(reqProm).resolves.toMatchInlineSnapshot(`
+			Object {
+			  "name": "test123",
+			  "origin": Object {
+			    "access_client_id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.access",
+			    "access_client_secret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			    "database": "neondb",
+			    "host": "example.com",
+			    "password": "password",
+			    "scheme": "postgresql",
+			    "user": "test",
+			  },
+			}
+		`);
+		expect(std.out).toMatchInlineSnapshot(`
+			"🚧 Creating 'test123'
+			✅ Created new Hyperdrive config: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+			📋 To start using your config from a Worker, add the following binding configuration to your Wrangler configuration file:
+
+			{
+			  \\"hyperdrive\\": [
+			    {
+			      \\"binding\\": \\"HYPERDRIVE\\",
+			      \\"id\\": \\"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\\"
+			    }
+			  ]
+			}"
+		`);
+	});
+
+	it("should create a hyperdrive over access config with a path in the host", async () => {
+		const reqProm = mockHyperdriveCreate();
+		await runWrangler(
+			"hyperdrive create test123 --host=example.com/database --database=neondb --user=test --password=password --access-client-id=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.access --access-client-secret=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+		);
+		await expect(reqProm).resolves.toMatchInlineSnapshot(`
+			Object {
+			  "name": "test123",
+			  "origin": Object {
+			    "access_client_id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.access",
+			    "access_client_secret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			    "database": "neondb",
+			    "host": "example.com/database",
+			    "password": "password",
+			    "scheme": "postgresql",
+			    "user": "test",
+			  },
+			}
+		`);
+		expect(std.out).toMatchInlineSnapshot(`
+			"🚧 Creating 'test123'
+			✅ Created new Hyperdrive config: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+			📋 To start using your config from a Worker, add the following binding configuration to your Wrangler configuration file:
+
+			{
+			  \\"hyperdrive\\": [
+			    {
+			      \\"binding\\": \\"HYPERDRIVE\\",
+			      \\"id\\": \\"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\\"
+			    }
+			  ]
+			}"
+		`);
+	});
+
+	it("should reject a create hyperdrive over access command if access client ID is set but not access client secret", async () => {
+		await expect(() =>
+			runWrangler(
+				"hyperdrive create test123 --host=example.com --database=neondb --user=test --password=password --access-client-id='xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.access'"
+			)
+		).rejects.toThrow();
+		expect(std.err).toMatchInlineSnapshot(`
+			"[31mX [41;31m[[41;97mERROR[41;31m][0m [1mMissing dependent arguments:[0m
+
+			   access-client-id -> access-client-secret
+
+			"
+		`);
+	});
+
+	it("should reject a create hyperdrive over access command if access client secret is set but not access client ID", async () => {
+		await expect(() =>
+			runWrangler(
+				"hyperdrive create test123 --host=example.com --database=neondb --user=test --password=password --access-client-secret=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+			)
+		).rejects.toThrow();
+		expect(std.err).toMatchInlineSnapshot(`
+			"[31mX [41;31m[[41;97mERROR[41;31m][0m [1mYou must provide both an Access Client ID and Access Client Secret when configuring Hyperdrive-over-Access[0m
+
+			"
+		`);
 	});
 
 	it("should handle listing configs", async () => {
-		mockHyperdriveRequest();
+		mockHyperdriveGetListOrDelete();
 		await runWrangler("hyperdrive list");
 		expect(std.out).toMatchInlineSnapshot(`
-		"📋 Listing Hyperdrive configs
-		┌──────────────────────────────────┬─────────┬────────┬─────────────────────────────┬──────┬──────────┬────────────────────┐
-		│ id                               │ name    │ user   │ host                        │ port │ database │ caching            │
-		├──────────────────────────────────┼─────────┼────────┼─────────────────────────────┼──────┼──────────┼────────────────────┤
-		│ fb94f15a95ce4afa803bb21794b2802c │ new-db  │ dbuser │ database.server.com         │ 3211 │ mydb     │ {\\"disabled\\":false} │
-		├──────────────────────────────────┼─────────┼────────┼─────────────────────────────┼──────┼──────────┼────────────────────┤
-		│ 7a040c1eee714e91a30ea6707a2d125c │ test123 │ test   │ foo.us-east-2.aws.neon.tech │ 5432 │ neondb   │ {\\"disabled\\":false} │
-		└──────────────────────────────────┴─────────┴────────┴─────────────────────────────┴──────┴──────────┴────────────────────┘"
-	`);
+			"📋 Listing Hyperdrive configs
+			┌──────────────────────────────────────┬─────────┬────────┬────────────────┬──────┬──────────┬───────────────────┐
+			│ id                                   │ name    │ user   │ host           │ port │ database │ caching           │
+			├──────────────────────────────────────┼─────────┼────────┼────────────────┼──────┼──────────┼───────────────────┤
+			│ xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx │ test123 │ test   │ example.com    │ 5432 │ neondb   │                   │
+			├──────────────────────────────────────┼─────────┼────────┼────────────────┼──────┼──────────┼───────────────────┤
+			│ yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy │ new-db  │ dbuser │ www.google.com │ 3211 │ mydb     │ {\\"disabled\\":true} │
+			└──────────────────────────────────────┴─────────┴────────┴────────────────┴──────┴──────────┴───────────────────┘"
+		`);
 	});
 
 	it("should handle displaying a config", async () => {
-		mockHyperdriveRequest();
-		await runWrangler("hyperdrive get 7a040c1eee714e91a30ea6707a2d125c");
+		mockHyperdriveGetListOrDelete();
+		await runWrangler("hyperdrive get xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx");
 		expect(std.out).toMatchInlineSnapshot(`
-		"{
-		  \\"id\\": \\"7a040c1eee714e91a30ea6707a2d125c\\",
-		  \\"name\\": \\"test123\\",
-		  \\"origin\\": {
-		    \\"host\\": \\"foo.us-east-2.aws.neon.tech\\",
-		    \\"port\\": 5432,
-		    \\"database\\": \\"neondb\\",
-		    \\"user\\": \\"test\\"
-		  },
-		  \\"caching\\": {
-		    \\"disabled\\": false
-		  }
-		}"
-	`);
+			"{
+			  \\"id\\": \\"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\\",
+			  \\"name\\": \\"test123\\",
+			  \\"origin\\": {
+			    \\"scheme\\": \\"postgresql\\",
+			    \\"host\\": \\"example.com\\",
+			    \\"port\\": 5432,
+			    \\"database\\": \\"neondb\\",
+			    \\"user\\": \\"test\\"
+			  }
+			}"
+		`);
 	});
 
 	it("should handle deleting a config", async () => {
-		mockHyperdriveRequest();
-		await runWrangler("hyperdrive delete 7a040c1eee714e91a30ea6707a2d125c");
+		mockHyperdriveGetListOrDelete();
+		await runWrangler("hyperdrive delete xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx");
 		expect(std.out).toMatchInlineSnapshot(`
-		"🗑️ Deleting Hyperdrive database config 7a040c1eee714e91a30ea6707a2d125c
+		"🗑️ Deleting Hyperdrive database config xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 		✅ Deleted"
 	`);
 	});
+
+	it("should handle updating a hyperdrive config's origin", async () => {
+		const reqProm = mockHyperdriveUpdate();
+		await runWrangler(
+			"hyperdrive update xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --origin-host=example.com --origin-port=1234"
+		);
+		await expect(reqProm).resolves.toMatchInlineSnapshot(`
+			Object {
+			  "origin": Object {
+			    "host": "example.com",
+			    "port": 1234,
+			  },
+			}
+		`);
+		expect(std.out).toMatchInlineSnapshot(`
+			"🚧 Updating 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+			✅ Updated xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx Hyperdrive config
+			 {
+			  \\"id\\": \\"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\\",
+			  \\"name\\": \\"test123\\",
+			  \\"origin\\": {
+			    \\"scheme\\": \\"postgresql\\",
+			    \\"host\\": \\"example.com\\",
+			    \\"port\\": 1234,
+			    \\"database\\": \\"neondb\\",
+			    \\"user\\": \\"test\\"
+			  }
+			}"
+		`);
+	});
+
+	it("should handle updating a hyperdrive config's user", async () => {
+		const reqProm = mockHyperdriveUpdate();
+		await runWrangler(
+			"hyperdrive update xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --origin-user=newuser --origin-password='passw0rd!'"
+		);
+		await expect(reqProm).resolves.toMatchInlineSnapshot(`
+			Object {
+			  "origin": Object {
+			    "password": "passw0rd!",
+			    "user": "newuser",
+			  },
+			}
+		`);
+		expect(std.out).toMatchInlineSnapshot(`
+			"🚧 Updating 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+			✅ Updated xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx Hyperdrive config
+			 {
+			  \\"id\\": \\"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\\",
+			  \\"name\\": \\"test123\\",
+			  \\"origin\\": {
+			    \\"scheme\\": \\"postgresql\\",
+			    \\"host\\": \\"example.com\\",
+			    \\"port\\": 5432,
+			    \\"database\\": \\"neondb\\",
+			    \\"user\\": \\"newuser\\"
+			  }
+			}"
+		`);
+	});
+
+	it("should throw an exception when creating a hyperdrive config but not all fields are set", async () => {
+		await expect(() =>
+			runWrangler(
+				"hyperdrive create test123 --origin-port=1234 --database=mydb --origin-user=newuser"
+			)
+		).rejects.toThrow();
+		expect(std.err).toMatchInlineSnapshot(`
+			"[31mX [41;31m[[41;97mERROR[41;31m][0m [1mYou must provide a password for the origin database[0m
+
+			"
+		`);
+		expect(std.out).toMatchInlineSnapshot(`""`);
+	});
+
+	it("should throw an exception when updating a hyperdrive config's origin but not all fields are set", async () => {
+		const _ = mockHyperdriveUpdate();
+		await expect(() =>
+			runWrangler(
+				"hyperdrive update xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --origin-port=1234 --database=mydb --origin-user=newuser"
+			)
+		).rejects.toThrow();
+		expect(std.err).toMatchInlineSnapshot(`
+			"[31mX [41;31m[[41;97mERROR[41;31m][0m [1mYou must provide an origin hostname for the database[0m
+
+			"
+		`);
+	});
+
+	it("should handle updating a hyperdrive config's caching settings", async () => {
+		const reqProm = mockHyperdriveUpdate();
+		await runWrangler(
+			"hyperdrive update xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --max-age=30 --swr=15"
+		);
+		await expect(reqProm).resolves.toMatchInlineSnapshot(`
+			Object {
+			  "caching": Object {
+			    "max_age": 30,
+			    "stale_while_revalidate": 15,
+			  },
+			}
+		`);
+		expect(std.out).toMatchInlineSnapshot(`
+			"🚧 Updating 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+			✅ Updated xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx Hyperdrive config
+			 {
+			  \\"id\\": \\"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\\",
+			  \\"name\\": \\"test123\\",
+			  \\"origin\\": {
+			    \\"scheme\\": \\"postgresql\\",
+			    \\"host\\": \\"example.com\\",
+			    \\"port\\": 5432,
+			    \\"database\\": \\"neondb\\",
+			    \\"user\\": \\"test\\"
+			  },
+			  \\"caching\\": {
+			    \\"max_age\\": 30,
+			    \\"stale_while_revalidate\\": 15
+			  }
+			}"
+		`);
+	});
+
+	it("should handle disabling caching for a hyperdrive config", async () => {
+		const reqProm = mockHyperdriveUpdate();
+		await runWrangler(
+			"hyperdrive update xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --caching-disabled=true"
+		);
+
+		await expect(reqProm).resolves.toMatchInlineSnapshot(`
+			Object {
+			  "caching": Object {
+			    "disabled": true,
+			  },
+			}
+		`);
+		expect(std.out).toMatchInlineSnapshot(`
+			"🚧 Updating 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+			✅ Updated xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx Hyperdrive config
+			 {
+			  \\"id\\": \\"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\\",
+			  \\"name\\": \\"test123\\",
+			  \\"origin\\": {
+			    \\"scheme\\": \\"postgresql\\",
+			    \\"host\\": \\"example.com\\",
+			    \\"port\\": 5432,
+			    \\"database\\": \\"neondb\\",
+			    \\"user\\": \\"test\\"
+			  },
+			  \\"caching\\": {
+			    \\"disabled\\": true
+			  }
+			}"
+		`);
+	});
+
+	it("should handle updating a hyperdrive config's name", async () => {
+		const reqProm = mockHyperdriveUpdate();
+		await runWrangler(
+			"hyperdrive update xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --name='new-name'"
+		);
+
+		await expect(reqProm).resolves.toMatchInlineSnapshot(`
+			Object {
+			  "name": "new-name",
+			}
+		`);
+		expect(std.out).toMatchInlineSnapshot(`
+			"🚧 Updating 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+			✅ Updated xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx Hyperdrive config
+			 {
+			  \\"id\\": \\"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\\",
+			  \\"name\\": \\"new-name\\",
+			  \\"origin\\": {
+			    \\"scheme\\": \\"postgresql\\",
+			    \\"host\\": \\"example.com\\",
+			    \\"port\\": 5432,
+			    \\"database\\": \\"neondb\\",
+			    \\"user\\": \\"test\\"
+			  }
+			}"
+		`);
+	});
+
+	it("should handle updating a hyperdrive to a hyperdrive over access config given the right parameters", async () => {
+		const reqProm = mockHyperdriveUpdate();
+		await runWrangler(
+			"hyperdrive update xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --origin-host=example.com --database=mydb --origin-user=newuser --origin-password='passw0rd!' --access-client-id='xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.access' --access-client-secret='xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'"
+		);
+
+		await expect(reqProm).resolves.toMatchInlineSnapshot(`
+			Object {
+			  "origin": Object {
+			    "access_client_id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.access",
+			    "access_client_secret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			    "database": "mydb",
+			    "host": "example.com",
+			    "password": "passw0rd!",
+			    "user": "newuser",
+			  },
+			}
+		`);
+		expect(std.out).toMatchInlineSnapshot(`
+			"🚧 Updating 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+			✅ Updated xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx Hyperdrive config
+			 {
+			  \\"id\\": \\"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\\",
+			  \\"name\\": \\"test123\\",
+			  \\"origin\\": {
+			    \\"scheme\\": \\"postgresql\\",
+			    \\"host\\": \\"example.com\\",
+			    \\"database\\": \\"mydb\\",
+			    \\"user\\": \\"newuser\\",
+			    \\"access_client_id\\": \\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.access\\"
+			  }
+			}"
+		`);
+	});
+
+	it("should throw an exception when updating a hyperdrive config's origin but neither port nor access credentials are provided", async () => {
+		await expect(() =>
+			runWrangler(
+				"hyperdrive update xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --origin-host=example.com --database=mydb --origin-user=newuser --origin-password='passw0rd!'"
+			)
+		).rejects.toThrow();
+		expect(std.err).toMatchInlineSnapshot(`
+			"[31mX [41;31m[[41;97mERROR[41;31m][0m [1mYou must provide a nonzero origin port for the database[0m
+
+			"
+		`);
+		expect(std.out).toMatchInlineSnapshot(`""`);
+	});
+
+	it("should throw an exception when updating a hyperdrive config's origin with access credentials but no other origin fields", async () => {
+		const _ = mockHyperdriveUpdate();
+		await expect(() =>
+			runWrangler(
+				"hyperdrive update xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --access-client-id='xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.access' --access-client-secret='xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'"
+			)
+		).rejects.toThrow();
+		expect(std.err).toMatchInlineSnapshot(`
+			"[31mX [41;31m[[41;97mERROR[41;31m][0m [1mYou must provide an origin hostname for the database[0m
+
+			"
+		`);
+		expect(std.out).toMatchInlineSnapshot(`""`);
+	});
+
+	it("should reject an update command if the access client ID is provided but not the access client secret", async () => {
+		await expect(() =>
+			runWrangler(
+				"hyperdrive update xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --origin-host=example.com --database=mydb --origin-user=newuser --origin-password='passw0rd!' --access-client-id='xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.access'"
+			)
+		).rejects.toThrow();
+		expect(std.err).toMatchInlineSnapshot(`
+			"[31mX [41;31m[[41;97mERROR[41;31m][0m [1mMissing dependent arguments:[0m
+
+			   access-client-id -> access-client-secret
+
+			"
+		`);
+	});
+
+	it("should reject an update command if the access client secret is provided but not the access client ID", async () => {
+		await expect(() =>
+			runWrangler(
+				"hyperdrive update xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --origin-host=example.com --database=mydb --origin-user=newuser --origin-password='passw0rd!' --access-client-secret='xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'"
+			)
+		).rejects.toThrow();
+		expect(std.err).toMatchInlineSnapshot(`
+			"[31mX [41;31m[[41;97mERROR[41;31m][0m [1mYou must provide both an Access Client ID and Access Client Secret when configuring Hyperdrive-over-Access[0m
+
+			"
+		`);
+	});
 });
 
-/** Create a mock handler for Hyperdrive API */
-function mockHyperdriveRequest() {
-	msw.use(
-		rest.get(
-			"*/accounts/:accountId/hyperdrive/configs/7a040c1eee714e91a30ea6707a2d125c",
-			(req, res, ctx) => {
-				return res.once(
-					ctx.json(
-						createFetchResult(
-							{
-								id: "7a040c1eee714e91a30ea6707a2d125c",
-								name: "test123",
-								origin: {
-									host: "foo.us-east-2.aws.neon.tech",
-									port: 5432,
-									database: "neondb",
-									user: "test",
-								},
-								caching: {
-									disabled: false,
-								},
-							},
+const defaultConfig: HyperdriveConfig = {
+	id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+	name: "test123",
+	origin: {
+		scheme: "postgresql",
+		host: "example.com",
+		port: 5432,
+		database: "neondb",
+		user: "test",
+	},
+};
 
-							true
-						)
-					)
-				);
-			}
+/** Create a mock handler for Hyperdrive API */
+function mockHyperdriveGetListOrDelete() {
+	msw.use(
+		http.get(
+			"*/accounts/:accountId/hyperdrive/configs/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+			() => {
+				return HttpResponse.json(createFetchResult(defaultConfig, true));
+			},
+			{ once: true }
 		),
-		rest.post(
+		http.delete(
+			"*/accounts/:accountId/hyperdrive/configs/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+			() => {
+				return HttpResponse.json(createFetchResult(null, true));
+			},
+			{ once: true }
+		),
+		http.get(
 			"*/accounts/:accountId/hyperdrive/configs",
-			async (req, res, ctx) => {
-				const reqBody = await req.json();
-				return res.once(
-					ctx.json(
-						createFetchResult(
-							{
-								id: "7a040c1eee714e91a30ea6707a2d125c",
-								name: "test123",
-								origin: {
-									host: "foo.us-east-2.aws.neon.tech",
-									port: reqBody.origin.port,
-									database: "neondb",
-									user: "test",
-								},
-								caching: {
-									disabled: false,
-								},
-							},
-							true
-						)
-					)
-				);
-			}
-		),
-		rest.delete(
-			"*/accounts/:accountId/hyperdrive/configs/7a040c1eee714e91a30ea6707a2d125c",
-			(req, res, ctx) => {
-				return res.once(ctx.json(createFetchResult(null, true)));
-			}
-		),
-		rest.get("*/accounts/:accountId/hyperdrive/configs", (req, res, ctx) => {
-			return res.once(
-				ctx.json(
+			() => {
+				return HttpResponse.json(
 					createFetchResult(
 						[
+							defaultConfig,
 							{
-								id: "fb94f15a95ce4afa803bb21794b2802c",
+								id: "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy",
 								name: "new-db",
 								origin: {
-									host: "database.server.com",
+									host: "www.google.com",
 									port: 3211,
 									database: "mydb",
 									user: "dbuser",
+									scheme: "postgresql",
 								},
 								caching: {
-									disabled: false,
-								},
-							},
-							{
-								id: "7a040c1eee714e91a30ea6707a2d125c",
-								name: "test123",
-								origin: {
-									host: "foo.us-east-2.aws.neon.tech",
-									port: 5432,
-									database: "neondb",
-									user: "test",
-								},
-								caching: {
-									disabled: false,
+									disabled: true,
 								},
 							},
 						],
 						true
 					)
-				)
-			);
-		})
+				);
+			},
+			{ once: true }
+		)
 	);
+}
+
+/** Create a mock handler for Hyperdrive API */
+function mockHyperdriveUpdate(): Promise<PatchHyperdriveBody> {
+	return new Promise((resolve) => {
+		msw.use(
+			http.get(
+				"*/accounts/:accountId/hyperdrive/configs/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+				() => {
+					return HttpResponse.json(createFetchResult(defaultConfig, true));
+				},
+				{ once: true }
+			),
+			http.patch(
+				"*/accounts/:accountId/hyperdrive/configs/:configId",
+				async ({ request }) => {
+					const reqBody = (await request.json()) as PatchHyperdriveBody;
+
+					resolve(reqBody);
+
+					let origin = defaultConfig.origin;
+					if (reqBody.origin) {
+						const {
+							password: _,
+							access_client_secret: _2,
+							...reqOrigin
+							// eslint-disable-next-line @typescript-eslint/no-explicit-any
+						} = reqBody.origin as any;
+						origin = { ...origin, ...reqOrigin };
+						if (reqOrigin.port) {
+							delete origin.access_client_id;
+							delete origin.access_client_secret;
+						} else if (
+							reqOrigin.access_client_id ||
+							reqOrigin.access_client_secret
+						) {
+							delete origin.port;
+						}
+					}
+
+					return HttpResponse.json(
+						createFetchResult(
+							{
+								id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+								name: reqBody.name ?? defaultConfig.name,
+								origin,
+								caching: reqBody.caching ?? defaultConfig.caching,
+							},
+							true
+						)
+					);
+				},
+				{ once: true }
+			)
+		);
+	});
+}
+
+/** Create a mock handler for Hyperdrive API */
+function mockHyperdriveCreate(): Promise<CreateUpdateHyperdriveBody> {
+	return new Promise((resolve) => {
+		msw.use(
+			http.post(
+				"*/accounts/:accountId/hyperdrive/configs",
+				async ({ request }) => {
+					const reqBody = (await request.json()) as CreateUpdateHyperdriveBody;
+
+					resolve(reqBody);
+
+					return HttpResponse.json(
+						createFetchResult(
+							{
+								id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+								name: reqBody.name,
+								origin: {
+									host: reqBody.origin.host,
+									port: reqBody.origin.port,
+									database: reqBody.origin.database,
+									scheme: reqBody.origin.scheme,
+									user: reqBody.origin.user,
+									access_client_id: reqBody.origin.access_client_id,
+								},
+								caching: reqBody.caching,
+							},
+							true
+						)
+					);
+				},
+				{ once: true }
+			)
+		);
+	});
 }

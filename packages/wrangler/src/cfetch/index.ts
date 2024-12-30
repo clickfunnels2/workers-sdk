@@ -1,21 +1,17 @@
 import { URLSearchParams } from "node:url";
-import { logger } from "../logger";
-import { ParseError } from "../parse";
-import { fetchInternal, performApiFetch } from "./internal";
+import { APIError } from "../parse";
+import { maybeThrowFriendlyError } from "./errors";
+import { fetchInternal } from "./internal";
+import type { FetchError } from "./errors";
 import type { RequestInit } from "undici";
 
 // Check out https://api.cloudflare.com/ for API docs.
 
-export interface FetchError {
-	code: number;
-	message: string;
-	error_chain?: FetchError[];
-}
 export interface FetchResult<ResponseType = unknown> {
 	success: boolean;
 	result: ResponseType;
 	errors: FetchError[];
-	messages: string[];
+	messages?: string[];
 	result_info?: unknown;
 }
 
@@ -164,20 +160,36 @@ function throwFetchError(
 	resource: string,
 	response: FetchResult<unknown>
 ): never {
-	const error = new ParseError({
+	// This is an error from within an MSW handler
+	if (typeof vitest !== "undefined" && !("errors" in response)) {
+		throw response;
+	}
+	for (const error of response.errors) {
+		maybeThrowFriendlyError(error);
+	}
+
+	const error = new APIError({
 		text: `A request to the Cloudflare API (${resource}) failed.`,
-		notes: response.errors.map((err) => ({
-			text: renderError(err),
-		})),
+		notes: [
+			...response.errors.map((err) => ({ text: renderError(err) })),
+			...(response.messages?.map((text) => ({ text })) ?? []),
+		],
 	});
 	// add the first error code directly to this error
 	// so consumers can use it for specific behaviour
 	const code = response.errors[0]?.code;
 	if (code) {
-		//@ts-expect-error non-standard property on Error
 		error.code = code;
 	}
+	// extract the account tag from the resource (if any)
+	error.accountTag = extractAccountTag(resource);
 	throw error;
+}
+
+export function extractAccountTag(resource: string) {
+	const re = new RegExp("/accounts/([a-zA-Z0-9]+)/?");
+	const matches = re.exec(resource);
+	return matches?.[1];
 }
 
 function hasCursor(result_info: unknown): result_info is { cursor: string } {
@@ -197,42 +209,4 @@ function renderError(err: FetchError, level = 0): string {
 		(err.code ? `${err.message} [code: ${err.code}]` : err.message) +
 		chainedMessages
 	);
-}
-
-/**
- * Fetch the raw script content of a Worker
- * Note, this will concatenate the files of multi-module workers
- */
-export async function fetchScriptContent(
-	resource: string,
-	init: RequestInit = {},
-	queryParams?: URLSearchParams,
-	abortSignal?: AbortSignal
-): Promise<string> {
-	const response = await performApiFetch(
-		resource,
-		init,
-		queryParams,
-		abortSignal
-	);
-
-	logger.debug(
-		"-- START CF API RESPONSE:",
-		response.statusText,
-		response.status
-	);
-
-	logger.debug("HEADERS:", { ...response.headers });
-	// logger.debug("RESPONSE:", text);
-	logger.debug("-- END CF API RESPONSE");
-	const contentType = response.headers.get("content-type");
-
-	const usesModules = contentType?.startsWith("multipart");
-	if (usesModules && contentType) {
-		const form = await response.formData();
-		const entries = Array.from(form.entries());
-		return entries.map((e) => e[1]).join("\n");
-	} else {
-		return await response.text();
-	}
 }

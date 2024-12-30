@@ -1,15 +1,16 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import * as path from "path";
 import { findUpSync } from "find-up";
-import { CI } from "./is-ci";
-import isInteractive from "./is-interactive";
+import { isNonInteractiveOrCI } from "./is-interactive";
 import { logger } from "./logger";
 
 let cacheMessageShown = false;
 
 let __cacheFolder: string | null | undefined;
 function getCacheFolder() {
-	if (__cacheFolder || __cacheFolder === null) return __cacheFolder;
+	if (__cacheFolder || __cacheFolder === null) {
+		return __cacheFolder;
+	}
 
 	const closestNodeModulesDirectory = findUpSync("node_modules", {
 		type: "directory",
@@ -24,13 +25,13 @@ function getCacheFolder() {
 	return __cacheFolder;
 }
 
-const arrayFormatter = new Intl.ListFormat("en", {
+const arrayFormatter = new Intl.ListFormat("en-US", {
 	style: "long",
 	type: "conjunction",
 });
 
 function showCacheMessage(fields: string[], folder: string) {
-	if (!cacheMessageShown && isInteractive() && !CI.isCI()) {
+	if (!cacheMessageShown && !isNonInteractiveOrCI()) {
 		if (fields.length > 0) {
 			logger.debug(
 				`Retrieving cached values for ${arrayFormatter.format(
@@ -52,7 +53,9 @@ export function getConfigCache<T>(fileName: string): Partial<T> {
 			);
 			showCacheMessage(Object.keys(configCache), cacheFolder);
 			return configCache;
-		} else return {};
+		} else {
+			return {};
+		}
 	} catch (err) {
 		return {};
 	}

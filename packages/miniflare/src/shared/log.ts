@@ -66,7 +66,18 @@ export class Log {
 	}
 
 	protected log(message: string): void {
+		Log.#beforeLogHook?.();
 		console.log(message);
+		Log.#afterLogHook?.();
+	}
+
+	static #beforeLogHook: (() => void) | undefined;
+	static unstable_registerBeforeLogHook(callback: (() => void) | undefined) {
+		this.#beforeLogHook = callback;
+	}
+	static #afterLogHook: (() => void) | undefined;
+	static unstable_registerAfterLogHook(callback: (() => void) | undefined) {
+		this.#afterLogHook = callback;
 	}
 
 	logWithLevel(level: LogLevel, message: string): void {
@@ -78,8 +89,7 @@ export class Log {
 
 	error(message: Error): void {
 		if (this.level < LogLevel.ERROR) {
-			// Rethrow message if it won't get logged
-			throw message;
+			// Ignore message if it won't get logged
 		} else if (message.stack) {
 			// Dim internal stack trace lines to highlight user code
 			const lines = message.stack.split("\n").map(dimInternalStackLine);
@@ -116,9 +126,7 @@ export class NoOpLog extends Log {
 
 	protected log(): void {}
 
-	error(message: Error): void {
-		throw message;
-	}
+	error(_message: Error): void {}
 }
 
 // Adapted from https://github.com/chalk/ansi-regex/blob/02fa893d619d3da85411acc8fd4e2eea0e95a9d9/index.js

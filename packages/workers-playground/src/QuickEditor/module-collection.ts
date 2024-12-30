@@ -1,15 +1,24 @@
 // Adapted from https://github.com/cloudflare/workers-sdk/blob/0a77990457652af36c60c52bf9c38c3a69945de4/packages/wrangler/src/module-collection.ts
 import globToRegExp from "glob-to-regexp";
-import { TypedModule } from "./useDraftWorker";
+import type { TypedModule } from "./useDraftWorker";
 
 type ConfigModuleRuleType =
 	| "ESModule"
 	| "CommonJS"
 	| "CompiledWasm"
 	| "Text"
-	| "Data";
+	| "Data"
+	| "PythonModule"
+	| "PythonRequirement";
 
-type CfModuleType = "esm" | "commonjs" | "compiled-wasm" | "text" | "buffer";
+type CfModuleType =
+	| "esm"
+	| "commonjs"
+	| "compiled-wasm"
+	| "text"
+	| "buffer"
+	| "python"
+	| "python-requirement";
 
 type Rule = {
 	type: ConfigModuleRuleType;
@@ -49,7 +58,7 @@ export interface CfModule {
 
 function flipObject<
 	K extends string | number | symbol,
-	V extends string | number | symbol
+	V extends string | number | symbol,
 >(obj: Record<K, V>): Record<V, K> {
 	return Object.fromEntries(Object.entries(obj).map(([k, v]) => [v, k]));
 }
@@ -60,6 +69,8 @@ const RuleTypeToModuleType: Record<ConfigModuleRuleType, CfModuleType> = {
 	CompiledWasm: "compiled-wasm",
 	Data: "buffer",
 	Text: "text",
+	PythonModule: "python",
+	PythonRequirement: "python-requirement",
 };
 
 export const ModuleTypeToRuleType = flipObject(RuleTypeToModuleType);
@@ -69,6 +80,7 @@ export const DEFAULT_MODULE_RULES: Rule[] = [
 	{ type: "Data", globs: ["**/*.bin"] },
 	{ type: "CompiledWasm", globs: ["**/*.wasm"] },
 	{ type: "ESModule", globs: ["**/*.js"] },
+	{ type: "PythonModule", globs: ["**/*.py"] },
 ];
 
 export function toMimeType(type: CfModuleType): string {
@@ -83,6 +95,8 @@ export function toMimeType(type: CfModuleType): string {
 			return "application/octet-stream";
 		case "text":
 			return "text/plain";
+		case "python":
+			return "text/x-python";
 		default:
 			throw new TypeError(`Unsupported module: ${type}`);
 	}

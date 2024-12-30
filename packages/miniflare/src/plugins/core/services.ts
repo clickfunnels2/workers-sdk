@@ -1,27 +1,38 @@
 import { z } from "zod";
 import { Request, Response } from "../../http";
+import { HOST_CAPNP_CONNECT, Miniflare } from "../../index";
 import {
 	ExternalServer,
 	HttpOptions_Style,
 	TlsOptions_Version,
 } from "../../runtime";
-import { zAwaitable } from "../../shared";
+import type { Awaitable } from "../../workers";
 
 // Zod validators for types in runtime/config/workerd.ts.
 // All options should be optional except where specifically stated.
 // TODO: autogenerate these with runtime/config/workerd.ts from capnp
 
+// Service binding designator that always points to the worker with the binding.
+// Using `Symbol.for()` instead of `Symbol()` in case multiple copies of
+// `miniflare` are loaded (e.g. when configuring Vitest and when running pool)
+export const kCurrentWorker = Symbol.for("miniflare.kCurrentWorker");
+
 export const HttpOptionsHeaderSchema = z.object({
 	name: z.string(), // name should be required
 	value: z.ostring(), // If omitted, the header will be removed
 });
-const HttpOptionsSchema = z.object({
-	style: z.nativeEnum(HttpOptions_Style).optional(),
-	forwardedProtoHeader: z.ostring(),
-	cfBlobHeader: z.ostring(),
-	injectRequestHeaders: HttpOptionsHeaderSchema.array().optional(),
-	injectResponseHeaders: HttpOptionsHeaderSchema.array().optional(),
-});
+const HttpOptionsSchema = z
+	.object({
+		style: z.nativeEnum(HttpOptions_Style).optional(),
+		forwardedProtoHeader: z.ostring(),
+		cfBlobHeader: z.ostring(),
+		injectRequestHeaders: HttpOptionsHeaderSchema.array().optional(),
+		injectResponseHeaders: HttpOptionsHeaderSchema.array().optional(),
+	})
+	.transform((options) => ({
+		...options,
+		capnpConnectHost: HOST_CAPNP_CONNECT,
+	}));
 
 const TlsOptionsKeypairSchema = z.object({
 	privateKey: z.ostring(),
@@ -69,13 +80,17 @@ const DiskDirectorySchema = z.object({
 	writable: z.oboolean(),
 });
 
-export const ServiceFetchSchema = z
-	.function()
-	.args(z.instanceof(Request))
-	.returns(zAwaitable(z.instanceof(Response)));
+export const ServiceFetchSchema = z.custom<
+	(request: Request, mf: Miniflare) => Awaitable<Response>
+>((v) => typeof v === "function");
 
 export const ServiceDesignatorSchema = z.union([
 	z.string(),
+	z.literal(kCurrentWorker),
+	z.object({
+		name: z.union([z.string(), z.literal(kCurrentWorker)]),
+		entrypoint: z.ostring(),
+	}),
 	z.object({ network: NetworkSchema }),
 	z.object({ external: ExternalServerSchema }),
 	z.object({ disk: DiskDirectorySchema }),

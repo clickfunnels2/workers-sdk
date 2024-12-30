@@ -1,15 +1,10 @@
 import chalk from "chalk";
 import prompts from "prompts";
-import { CI } from "./is-ci";
-import isInteractive from "./is-interactive";
+import { UserError } from "./errors";
+import { isNonInteractiveOrCI } from "./is-interactive";
 import { logger } from "./logger";
 
-// TODO: Use this function across the codebase.
-function isNonInteractiveOrCI(): boolean {
-	return !isInteractive() || CI.isCI();
-}
-
-export class NoDefaultValueProvided extends Error {
+export class NoDefaultValueProvided extends UserError {
 	constructor() {
 		// This is user-facing, so make the message something understandable
 		// It _should_ always be caught and replaced with a more descriptive error
@@ -21,20 +16,21 @@ export class NoDefaultValueProvided extends Error {
 
 interface ConfirmOptions {
 	defaultValue?: boolean;
+	fallbackValue?: boolean;
 }
 
 export async function confirm(
 	text: string,
-	{ defaultValue = true }: ConfirmOptions = {}
+	{ defaultValue = true, fallbackValue = true }: ConfirmOptions = {}
 ): Promise<boolean> {
 	if (isNonInteractiveOrCI()) {
 		logger.log(`? ${text}`);
 		logger.log(
 			`🤖 ${chalk.dim(
-				"Using default value in non-interactive context:"
-			)} ${chalk.white.bold(defaultValue ? "yes" : "no")}`
+				"Using fallback value in non-interactive context:"
+			)} ${chalk.white.bold(fallbackValue ? "yes" : "no")}`
 		);
-		return defaultValue;
+		return fallbackValue;
 	}
 	const { value } = await prompts({
 		type: "confirm",
@@ -124,6 +120,50 @@ export async function select<Values extends string>(
 		message: text,
 		choices: options.choices,
 		initial: options.defaultOption,
+		onState: (state) => {
+			if (state.aborted) {
+				process.nextTick(() => {
+					process.exit(1);
+				});
+			}
+		},
+	});
+	return value;
+}
+
+interface MultiSelectOptions<Values> {
+	choices: SelectOption<Values>[];
+	defaultOptions?: number[];
+}
+
+export async function multiselect<Values extends string>(
+	text: string,
+	options: MultiSelectOptions<Values>
+): Promise<Values[]> {
+	if (isNonInteractiveOrCI()) {
+		if (options?.defaultOptions === undefined) {
+			throw new NoDefaultValueProvided();
+		}
+
+		const defaultTitles = options.defaultOptions.map(
+			(index) => options.choices[index].title
+		);
+		logger.log(`? ${text}`);
+
+		logger.log(
+			`🤖 ${chalk.dim(
+				"Using default value(s) in non-interactive context:"
+			)} ${chalk.white.bold(defaultTitles.join(", "))}`
+		);
+		return options.defaultOptions.map((index) => options.choices[index].value);
+	}
+	const { value } = await prompts({
+		type: "multiselect",
+		name: "value",
+		message: text,
+		choices: options.choices,
+		instructions: false,
+		hint: "- Space to select. Return to submit",
 		onState: (state) => {
 			if (state.aborted) {
 				process.nextTick(() => {

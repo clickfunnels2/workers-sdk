@@ -1,44 +1,68 @@
 import assert from "node:assert";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { FormData, File } from "undici";
+import { File, FormData } from "undici";
+import { UserError } from "../errors";
+import { INHERIT_SYMBOL } from "./bindings";
 import { handleUnsafeCapnp } from "./capnp";
+import type { Observability } from "../config/environment";
 import type {
-	CfWorkerInit,
-	CfModuleType,
 	CfDurableObjectMigrations,
+	CfModuleType,
 	CfPlacement,
 	CfTailConsumer,
 	CfUserLimits,
+	CfWorkerInit,
 } from "./worker.js";
+import type { AssetConfig } from "@cloudflare/workers-shared";
 import type { Json } from "miniflare";
 
-export function toMimeType(type: CfModuleType): string {
-	switch (type) {
-		case "esm":
-			return "application/javascript+module";
-		case "commonjs":
-			return "application/javascript";
-		case "compiled-wasm":
-			return "application/wasm";
-		case "buffer":
-			return "application/octet-stream";
-		case "text":
-			return "text/plain";
-		default:
-			throw new TypeError("Unsupported module: " + type);
+const moduleTypeMimeType: { [type in CfModuleType]: string | undefined } = {
+	esm: "application/javascript+module",
+	commonjs: "application/javascript",
+	"compiled-wasm": "application/wasm",
+	buffer: "application/octet-stream",
+	text: "text/plain",
+	python: "text/x-python",
+	"python-requirement": "text/x-python-requirement",
+	"nodejs-compat-module": undefined,
+};
+
+function toMimeType(type: CfModuleType): string {
+	const mimeType = moduleTypeMimeType[type];
+	if (mimeType === undefined) {
+		throw new TypeError("Unsupported module: " + type);
 	}
+
+	return mimeType;
+}
+
+export function fromMimeType(mimeType: string): CfModuleType {
+	const moduleType = Object.keys(moduleTypeMimeType).find(
+		(type) => moduleTypeMimeType[type as CfModuleType] === mimeType
+	) as CfModuleType | undefined;
+	if (moduleType === undefined) {
+		throw new TypeError("Unsupported mime type: " + mimeType);
+	}
+
+	return moduleType;
 }
 
 export type WorkerMetadataBinding =
 	// If you add any new binding types here, also add it to safeBindings
 	// under validateUnsafeBinding in config/validation.ts
+
+	// Inherit is _not_ in safeBindings because it is here for API use only
+	// wrangler supports this per type today through keep_bindings
+	| { type: "inherit"; name: string }
 	| { type: "plain_text"; name: string; text: string }
+	| { type: "secret_text"; name: string; text: string }
 	| { type: "json"; name: string; json: Json }
 	| { type: "wasm_module"; name: string; part: string }
 	| { type: "text_blob"; name: string; part: string }
 	| { type: "browser"; name: string }
-	| { type: "ai"; name: string }
+	| { type: "ai"; name: string; staging?: boolean }
+	| { type: "version_metadata"; name: string }
 	| { type: "data_blob"; name: string; part: string }
 	| { type: "kv_namespace"; name: string; namespace_id: string }
 	| {
@@ -54,7 +78,14 @@ export type WorkerMetadataBinding =
 			script_name?: string;
 			environment?: string;
 	  }
-	| { type: "queue"; name: string; queue_name: string }
+	| {
+			type: "workflow";
+			name: string;
+			workflow_name: string;
+			class_name: string;
+			script_name?: string;
+	  }
+	| { type: "queue"; name: string; queue_name: string; delivery_delay?: number }
 	| {
 			type: "r2_bucket";
 			name: string;
@@ -68,9 +99,14 @@ export type WorkerMetadataBinding =
 			index_name: string;
 			internalEnv?: string;
 	  }
-	| { type: "constellation"; name: string; project: string }
 	| { type: "hyperdrive"; name: string; id: string }
-	| { type: "service"; name: string; service: string; environment?: string }
+	| {
+			type: "service";
+			name: string;
+			service: string;
+			environment?: string;
+			entrypoint?: string;
+	  }
 	| { type: "analytics_engine"; name: string; dataset?: string }
 	| {
 			type: "dispatch_namespace";
@@ -85,13 +121,16 @@ export type WorkerMetadataBinding =
 			};
 	  }
 	| { type: "mtls_certificate"; name: string; certificate_id: string }
+	| { type: "pipelines"; name: string; pipeline: string }
 	| {
 			type: "logfwdr";
 			name: string;
 			destination: string;
-	  };
+	  }
+	| { type: "assets"; name: string };
 
-export interface WorkerMetadata {
+// for PUT /accounts/:accountId/workers/scripts/:scriptName
+type WorkerMetadataPut = {
 	/** The name of the entry point module. Only exists when the worker is in the ES module format */
 	main_module?: string;
 	/** The name of the entry point module. Only exists when the worker is in the service-worker format */
@@ -102,14 +141,31 @@ export interface WorkerMetadata {
 	migrations?: CfDurableObjectMigrations;
 	capnp_schema?: string;
 	bindings: WorkerMetadataBinding[];
-	keep_bindings?: WorkerMetadataBinding["type"][];
+	keep_bindings?: (
+		| WorkerMetadataBinding["type"]
+		| "secret_text"
+		| "secret_key"
+	)[];
 	logpush?: boolean;
 	placement?: CfPlacement;
 	tail_consumers?: CfTailConsumer[];
 	limits?: CfUserLimits;
+
+	assets?: {
+		jwt: string;
+		config?: AssetConfig;
+	};
+	observability?: Observability | undefined;
 	// Allow unsafe.metadata to add arbitrary properties at runtime
 	[key: string]: unknown;
-}
+};
+
+// for POST /accounts/:accountId/workers/:workerName/versions
+type WorkerMetadataVersionsPost = WorkerMetadataPut & {
+	annotations?: Record<string, string>;
+};
+
+export type WorkerMetadata = WorkerMetadataPut | WorkerMetadataVersionsPost;
 
 /**
  * Creates a `FormData` upload from a `CfWorkerInit`.
@@ -118,21 +174,49 @@ export function createWorkerUploadForm(worker: CfWorkerInit): FormData {
 	const formData = new FormData();
 	const {
 		main,
+		sourceMaps,
 		bindings,
+		rawBindings,
 		migrations,
-		usage_model,
 		compatibility_date,
 		compatibility_flags,
 		keepVars,
+		keepSecrets,
+		keepBindings,
 		logpush,
 		placement,
 		tail_consumers,
 		limits,
+		annotations,
+		keep_assets,
+		assets,
+		observability,
 	} = worker;
 
+	const assetConfig = {
+		html_handling: assets?.assetConfig?.html_handling,
+		not_found_handling: assets?.assetConfig?.not_found_handling,
+		serve_directly: assets?.assetConfig?.serve_directly,
+	};
+
+	// short circuit if static assets upload only
+	if (assets && !assets.routingConfig.has_user_worker) {
+		formData.set(
+			"metadata",
+			JSON.stringify({
+				assets: {
+					jwt: assets.jwt,
+					config: assetConfig,
+				},
+				...(compatibility_date && { compatibility_date }),
+				...(compatibility_flags && { compatibility_flags }),
+			})
+		);
+		return formData;
+	}
 	let { modules } = worker;
 
-	const metadataBindings: WorkerMetadata["bindings"] = [];
+	const metadataBindings: WorkerMetadataBinding[] = rawBindings ?? [];
 
 	Object.entries(bindings.vars || {})?.forEach(([key, value]) => {
 		if (typeof value === "string") {
@@ -143,11 +227,22 @@ export function createWorkerUploadForm(worker: CfWorkerInit): FormData {
 	});
 
 	bindings.kv_namespaces?.forEach(({ id, binding }) => {
-		metadataBindings.push({
-			name: binding,
-			type: "kv_namespace",
-			namespace_id: id,
-		});
+		if (id === undefined) {
+			throw new UserError(`${binding} bindings must have an "id" field`);
+		}
+
+		if (id === INHERIT_SYMBOL) {
+			metadataBindings.push({
+				name: binding,
+				type: "inherit",
+			});
+		} else {
+			metadataBindings.push({
+				name: binding,
+				type: "kv_namespace",
+				namespace_id: id,
+			});
+		}
 	});
 
 	bindings.send_email?.forEach(
@@ -173,31 +268,68 @@ export function createWorkerUploadForm(worker: CfWorkerInit): FormData {
 		}
 	);
 
-	bindings.queues?.forEach(({ binding, queue_name }) => {
+	bindings.workflows?.forEach(({ binding, name, class_name, script_name }) => {
+		metadataBindings.push({
+			type: "workflow",
+			name: binding,
+			workflow_name: name,
+			class_name,
+			...(script_name && { script_name }),
+		});
+	});
+
+	bindings.queues?.forEach(({ binding, queue_name, delivery_delay }) => {
 		metadataBindings.push({
 			type: "queue",
 			name: binding,
 			queue_name,
+			delivery_delay,
 		});
 	});
 
 	bindings.r2_buckets?.forEach(({ binding, bucket_name, jurisdiction }) => {
-		metadataBindings.push({
-			name: binding,
-			type: "r2_bucket",
-			bucket_name,
-			jurisdiction,
-		});
+		if (bucket_name === undefined) {
+			throw new UserError(
+				`${binding} bindings must have a "bucket_name" field`
+			);
+		}
+
+		if (bucket_name === INHERIT_SYMBOL) {
+			metadataBindings.push({
+				name: binding,
+				type: "inherit",
+			});
+		} else {
+			metadataBindings.push({
+				name: binding,
+				type: "r2_bucket",
+				bucket_name,
+				jurisdiction,
+			});
+		}
 	});
 
 	bindings.d1_databases?.forEach(
 		({ binding, database_id, database_internal_env }) => {
-			metadataBindings.push({
-				name: binding,
-				type: "d1",
-				id: database_id,
-				internalEnv: database_internal_env,
-			});
+			if (database_id === undefined) {
+				throw new UserError(
+					`${binding} bindings must have a "database_id" field`
+				);
+			}
+
+			if (database_id === INHERIT_SYMBOL) {
+				metadataBindings.push({
+					name: binding,
+					type: "inherit",
+				});
+			} else {
+				metadataBindings.push({
+					name: binding,
+					type: "d1",
+					id: database_id,
+					internalEnv: database_internal_env,
+				});
+			}
 		}
 	);
 
@@ -209,14 +341,6 @@ export function createWorkerUploadForm(worker: CfWorkerInit): FormData {
 		});
 	});
 
-	bindings.constellation?.forEach(({ binding, project_id }) => {
-		metadataBindings.push({
-			name: binding,
-			type: "constellation",
-			project: project_id,
-		});
-	});
-
 	bindings.hyperdrive?.forEach(({ binding, id }) => {
 		metadataBindings.push({
 			name: binding,
@@ -225,14 +349,17 @@ export function createWorkerUploadForm(worker: CfWorkerInit): FormData {
 		});
 	});
 
-	bindings.services?.forEach(({ binding, service, environment }) => {
-		metadataBindings.push({
-			name: binding,
-			type: "service",
-			service,
-			...(environment && { environment }),
-		});
-	});
+	bindings.services?.forEach(
+		({ binding, service, environment, entrypoint }) => {
+			metadataBindings.push({
+				name: binding,
+				type: "service",
+				service,
+				...(environment && { environment }),
+				...(entrypoint && { entrypoint }),
+			});
+		}
+	);
 
 	bindings.analytics_engine_datasets?.forEach(({ binding, dataset }) => {
 		metadataBindings.push({
@@ -267,6 +394,14 @@ export function createWorkerUploadForm(worker: CfWorkerInit): FormData {
 		});
 	});
 
+	bindings.pipelines?.forEach(({ binding, pipeline }) => {
+		metadataBindings.push({
+			name: binding,
+			type: "pipelines",
+			pipeline: pipeline,
+		});
+	});
+
 	bindings.logfwdr?.bindings.forEach(({ name, destination }) => {
 		metadataBindings.push({
 			name: name,
@@ -275,7 +410,7 @@ export function createWorkerUploadForm(worker: CfWorkerInit): FormData {
 		});
 	});
 
-	for (const [name, filePath] of Object.entries(bindings.wasm_modules || {})) {
+	for (const [name, source] of Object.entries(bindings.wasm_modules || {})) {
 		metadataBindings.push({
 			name,
 			type: "wasm_module",
@@ -284,9 +419,13 @@ export function createWorkerUploadForm(worker: CfWorkerInit): FormData {
 
 		formData.set(
 			name,
-			new File([readFileSync(filePath)], filePath, {
-				type: "application/wasm",
-			})
+			new File(
+				[typeof source === "string" ? readFileSync(source) : source],
+				typeof source === "string" ? source : name,
+				{
+					type: "application/wasm",
+				}
+			)
 		);
 	}
 
@@ -300,7 +439,22 @@ export function createWorkerUploadForm(worker: CfWorkerInit): FormData {
 	if (bindings.ai !== undefined) {
 		metadataBindings.push({
 			name: bindings.ai.binding,
+			staging: bindings.ai.staging,
 			type: "ai",
+		});
+	}
+
+	if (bindings.version_metadata !== undefined) {
+		metadataBindings.push({
+			name: bindings.version_metadata.binding,
+			type: "version_metadata",
+		});
+	}
+
+	if (bindings.assets !== undefined) {
+		metadataBindings.push({
+			name: bindings.assets.binding,
+			type: "assets",
 		});
 	}
 
@@ -321,7 +475,7 @@ export function createWorkerUploadForm(worker: CfWorkerInit): FormData {
 		}
 	}
 
-	for (const [name, filePath] of Object.entries(bindings.data_blobs || {})) {
+	for (const [name, source] of Object.entries(bindings.data_blobs || {})) {
 		metadataBindings.push({
 			name,
 			type: "data_blob",
@@ -330,9 +484,13 @@ export function createWorkerUploadForm(worker: CfWorkerInit): FormData {
 
 		formData.set(
 			name,
-			new File([readFileSync(filePath)], filePath, {
-				type: "application/octet-stream",
-			})
+			new File(
+				[typeof source === "string" ? readFileSync(source) : source],
+				typeof source === "string" ? source : name,
+				{
+					type: "application/octet-stream",
+				}
+			)
 		);
 	}
 
@@ -368,7 +526,9 @@ export function createWorkerUploadForm(worker: CfWorkerInit): FormData {
 		for (const subDir of subDirs) {
 			// Ignore `.` as it's not a subdirectory, and we don't want to
 			// register the manifest module in the root twice.
-			if (subDir === ".") continue;
+			if (subDir === ".") {
+				continue;
+			}
 			const relativePath = path.posix.relative(subDir, manifestModuleName);
 			const filePath = path.posix.join(subDir, manifestModuleName);
 			modules.push({
@@ -411,8 +571,8 @@ export function createWorkerUploadForm(worker: CfWorkerInit): FormData {
 						module.type === "compiled-wasm"
 							? "wasm_module"
 							: module.type === "text"
-							? "text_blob"
-							: "data_blob",
+								? "text_blob"
+								: "data_blob",
 					part: name,
 				});
 
@@ -424,8 +584,8 @@ export function createWorkerUploadForm(worker: CfWorkerInit): FormData {
 							module.type === "compiled-wasm"
 								? "application/wasm"
 								: module.type === "text"
-								? "text/plain"
-								: "application/octet-stream",
+									? "text/plain"
+									: "application/octet-stream",
 					})
 				);
 				// And then remove it from the modules collection
@@ -451,21 +611,45 @@ export function createWorkerUploadForm(worker: CfWorkerInit): FormData {
 		);
 	}
 
+	let keep_bindings: WorkerMetadata["keep_bindings"] = undefined;
+	if (keepVars) {
+		keep_bindings ??= [];
+		keep_bindings.push("plain_text", "json");
+	}
+	if (keepSecrets) {
+		keep_bindings ??= [];
+		keep_bindings.push("secret_text", "secret_key");
+	}
+	if (keepBindings) {
+		keep_bindings ??= [];
+		keep_bindings.push(...keepBindings);
+	}
+
 	const metadata: WorkerMetadata = {
 		...(main.type !== "commonjs"
 			? { main_module: main.name }
 			: { body_part: main.name }),
 		bindings: metadataBindings,
 		...(compatibility_date && { compatibility_date }),
-		...(compatibility_flags && { compatibility_flags }),
-		...(usage_model && { usage_model }),
+		...(compatibility_flags && {
+			compatibility_flags,
+		}),
 		...(migrations && { migrations }),
 		capnp_schema: capnpSchemaOutputFile,
-		...(keepVars && { keep_bindings: ["plain_text", "json"] }),
+		...(keep_bindings && { keep_bindings }),
 		...(logpush !== undefined && { logpush }),
 		...(placement && { placement }),
 		...(tail_consumers && { tail_consumers }),
 		...(limits && { limits }),
+		...(annotations && { annotations }),
+		...(keep_assets !== undefined && { keep_assets }),
+		...(assets && {
+			assets: {
+				jwt: assets.jwt,
+				config: assetConfig,
+			},
+		}),
+		...(observability && { observability }),
 	};
 
 	if (bindings.unsafe?.metadata !== undefined) {
@@ -487,6 +671,15 @@ export function createWorkerUploadForm(worker: CfWorkerInit): FormData {
 			module.name,
 			new File([module.content], module.name, {
 				type: toMimeType(module.type ?? main.type ?? "esm"),
+			})
+		);
+	}
+
+	for (const sourceMap of sourceMaps || []) {
+		formData.set(
+			sourceMap.name,
+			new File([sourceMap.content], sourceMap.name, {
+				type: "application/source-map",
 			})
 		);
 	}

@@ -1,22 +1,36 @@
-import { rest } from "msw";
+import { http, HttpResponse } from "msw";
 import { getHostFromUrl, getZoneForRoute } from "../zones";
 import { mockAccountId, mockApiToken } from "./helpers/mock-account-id";
 import { msw } from "./helpers/msw";
-function mockGetZones(domain: string, zones: { id: string }[] = []) {
-	msw.use(
-		rest.get("*/zones", (req, res, ctx) => {
-			expect([...req.url.searchParams.entries()]).toEqual([["name", domain]]);
 
-			return res.once(
-				ctx.status(200),
-				ctx.json({
-					success: true,
-					errors: [],
-					messages: [],
-					result: zones,
-				})
-			);
-		})
+function mockGetZones(
+	domain: string,
+	zones: { id: string }[] = [],
+	accountId = "some-account-id"
+) {
+	msw.use(
+		http.get(
+			"*/zones",
+			({ request }) => {
+				const url = new URL(request.url);
+
+				expect([...url.searchParams.entries()]).toEqual([
+					["name", domain],
+					["account.id", accountId],
+				]);
+
+				return HttpResponse.json(
+					{
+						success: true,
+						errors: [],
+						messages: [],
+						result: zones,
+					},
+					{ status: 200 }
+				);
+			},
+			{ once: true }
+		)
 	);
 }
 
@@ -60,7 +74,12 @@ describe("Zones", () => {
 	describe("getZoneForRoute", () => {
 		test("string route", async () => {
 			mockGetZones("example.com", [{ id: "example-id" }]);
-			expect(await getZoneForRoute("example.com/*")).toEqual({
+			expect(
+				await getZoneForRoute({
+					route: "example.com/*",
+					accountId: "some-account-id",
+				})
+			).toEqual({
 				host: "example.com",
 				id: "example-id",
 			});
@@ -69,17 +88,21 @@ describe("Zones", () => {
 		test("string route (not a zone)", async () => {
 			mockGetZones("wrong.com", []);
 			await expect(
-				getZoneForRoute("wrong.com/*")
-			).rejects.toMatchInlineSnapshot(
-				`[Error: Could not find zone for wrong.com]`
-			);
+				getZoneForRoute({ route: "wrong.com/*", accountId: "some-account-id" })
+			).rejects.toMatchInlineSnapshot(`
+				[Error: Could not find zone for \`wrong.com\`. Make sure the domain is set up to be proxied by Cloudflare.
+				For more details, refer to https://developers.cloudflare.com/workers/configuration/routing/routes/#set-up-a-route]
+			`);
 		});
 		test("zone_id route", async () => {
 			// example-id and other-id intentionally different to show that the API is not called
 			// when a zone_id is provided in the route
 			mockGetZones("example.com", [{ id: "example-id" }]);
 			expect(
-				await getZoneForRoute({ pattern: "example.com/*", zone_id: "other-id" })
+				await getZoneForRoute({
+					route: { pattern: "example.com/*", zone_id: "other-id" },
+					accountId: "some-account-id",
+				})
 			).toEqual({
 				host: "example.com",
 				id: "other-id",
@@ -91,8 +114,11 @@ describe("Zones", () => {
 			mockGetZones("example.com", [{ id: "example-id" }]);
 			expect(
 				await getZoneForRoute({
-					pattern: "some.third-party.com/*",
-					zone_id: "other-id",
+					route: {
+						pattern: "some.third-party.com/*",
+						zone_id: "other-id",
+					},
+					accountId: "some-account-id",
 				})
 			).toEqual({
 				host: "some.third-party.com",
@@ -104,8 +130,11 @@ describe("Zones", () => {
 			mockGetZones("example.com", [{ id: "example-id" }]);
 			expect(
 				await getZoneForRoute({
-					pattern: "example.com/*",
-					zone_name: "example.com",
+					route: {
+						pattern: "example.com/*",
+						zone_name: "example.com",
+					},
+					accountId: "some-account-id",
 				})
 			).toEqual({
 				host: "example.com",
@@ -116,8 +145,11 @@ describe("Zones", () => {
 			mockGetZones("example.com", [{ id: "example-id" }]);
 			expect(
 				await getZoneForRoute({
-					pattern: "subdomain.example.com/*",
-					zone_name: "example.com",
+					route: {
+						pattern: "subdomain.example.com/*",
+						zone_name: "example.com",
+					},
+					accountId: "some-account-id",
 				})
 			).toEqual({
 				host: "subdomain.example.com",
@@ -128,8 +160,11 @@ describe("Zones", () => {
 			mockGetZones("example.com", [{ id: "example-id" }]);
 			expect(
 				await getZoneForRoute({
-					pattern: "some.third-party.com/*",
-					zone_name: "example.com",
+					route: {
+						pattern: "some.third-party.com/*",
+						zone_name: "example.com",
+					},
+					accountId: "some-account-id",
 				})
 			).toEqual({
 				host: "some.third-party.com",

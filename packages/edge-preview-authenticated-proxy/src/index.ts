@@ -1,4 +1,5 @@
 import cookie from "cookie";
+import prom from "promjs";
 import { Toucan } from "toucan-js";
 
 class HttpError extends Error {
@@ -21,7 +22,7 @@ class HttpError extends Error {
 				status: this.status,
 				headers: {
 					"Access-Control-Allow-Origin": "*",
-					"Access-Control-Allow-Method": "GET,PUT,POST",
+					"Access-Control-Allow-Methods": "GET,PUT,POST",
 				},
 			}
 		);
@@ -65,11 +66,29 @@ class RawHttpFailed extends HttpError {
 }
 
 class PreviewRequestFailed extends HttpError {
-	constructor(private tokenId: string, reportable: boolean) {
+	constructor(
+		private tokenId: string,
+		reportable: boolean
+	) {
 		super("Token and remote not found", 400, reportable);
 	}
 	get data(): { tokenId: string } {
 		return { tokenId: this.tokenId };
+	}
+}
+
+class InvalidURL extends HttpError {
+	constructor(private readonly url: string) {
+		super("Invalid URL", 400, false);
+	}
+	get data() {
+		return { url: this.url };
+	}
+}
+
+function assertValidURL(maybeUrl: string) {
+	if (!URL.canParse(maybeUrl)) {
+		throw new InvalidURL(maybeUrl);
 	}
 }
 
@@ -169,7 +188,7 @@ async function handleRawHttp(request: Request, url: URL) {
 		return new Response(null, {
 			headers: {
 				"Access-Control-Allow-Origin": request.headers.get("Origin") ?? "",
-				"Access-Control-Allow-Method": "*",
+				"Access-Control-Allow-Methods": "*",
 				"Access-Control-Allow-Credentials": "true",
 				"Access-Control-Allow-Headers":
 					request.headers.get("Access-Control-Request-Headers") ??
@@ -198,6 +217,15 @@ async function handleRawHttp(request: Request, url: URL) {
 	requestHeaders.delete("X-CF-Token");
 	requestHeaders.delete("X-CF-Remote");
 
+	const headerEntries = [...requestHeaders.entries()];
+
+	for (const header of headerEntries) {
+		if (header[0].startsWith("cf-ew-raw-")) {
+			requestHeaders.set(header[0].split("cf-ew-raw-")[1], header[1]);
+			requestHeaders.delete(header[0]);
+		}
+	}
+
 	const workerResponse = await fetch(
 		switchRemote(url, remote),
 		new Request(request, {
@@ -206,23 +234,31 @@ async function handleRawHttp(request: Request, url: URL) {
 		})
 	);
 
+	const responseHeaders = new Headers(workerResponse.headers);
+
+	const rawHeaders = new Headers({
+		"Access-Control-Allow-Origin": request.headers.get("Origin") ?? "",
+		"Access-Control-Allow-Methods": "*",
+		"Access-Control-Allow-Credentials": "true",
+		"cf-ew-status": workerResponse.status.toString(),
+		"Access-Control-Expose-Headers": "*",
+		Vary: "Origin",
+	});
+
 	// The client needs the raw headers from the worker
 	// Prefix them with `cf-ew-raw-`, so that response headers from _this_ worker don't interfere
-	const rawHeaders: Record<string, string> = {};
-	for (const header of workerResponse.headers.entries()) {
-		rawHeaders[`cf-ew-raw-${header[0]}`] = header[1];
+	const setCookieHeader = responseHeaders.getSetCookie();
+	for (const setCookie of setCookieHeader) {
+		rawHeaders.append("cf-ew-raw-set-cookie", setCookie);
 	}
+	responseHeaders.delete("Set-Cookie");
+	for (const header of responseHeaders.entries()) {
+		rawHeaders.set(`cf-ew-raw-${header[0]}`, header[1]);
+	}
+
 	return new Response(workerResponse.body, {
 		...workerResponse,
-		headers: {
-			...rawHeaders,
-			"Access-Control-Allow-Origin": request.headers.get("Origin") ?? "",
-			"Access-Control-Allow-Method": "*",
-			"Access-Control-Allow-Credentials": "true",
-			"cf-ew-status": workerResponse.status.toString(),
-			"Access-Control-Expose-Headers": "*",
-			Vary: "Origin",
-		},
+		headers: rawHeaders,
 	});
 }
 
@@ -250,6 +286,9 @@ async function updatePreviewToken(url: URL, env: Env, ctx: ExecutionContext) {
 	if (!token || !prewarmUrl || !remote) {
 		throw new TokenUpdateFailed();
 	}
+
+	assertValidURL(prewarmUrl);
+	assertValidURL(remote);
 
 	ctx.waitUntil(
 		fetch(prewarmUrl, {
@@ -280,6 +319,7 @@ async function updatePreviewToken(url: URL, env: Env, ctx: ExecutionContext) {
 				sameSite: "none",
 				httpOnly: true,
 				domain: url.hostname,
+				partitioned: true,
 			}),
 		},
 	});
@@ -295,6 +335,7 @@ async function handleTokenExchange(url: URL) {
 	if (!exchangeUrl) {
 		throw new NoExchangeUrl();
 	}
+	assertValidURL(exchangeUrl);
 	const exchangeRes = await fetch(exchangeUrl);
 	if (exchangeRes.status !== 200) {
 		const exchange = new URL(exchangeUrl);
@@ -327,7 +368,7 @@ async function handleTokenExchange(url: URL) {
 	return Response.json(session, {
 		headers: {
 			"Access-Control-Allow-Origin": "*",
-			"Access-Control-Allow-Method": "POST",
+			"Access-Control-Allow-Methods": "POST",
 		},
 	});
 }
@@ -339,6 +380,14 @@ export default {
 		env: Env,
 		ctx: ExecutionContext
 	): Promise<Response> {
+		const registry = prom();
+		const requestCounter = registry.create(
+			"counter",
+			"devprod_edge_preview_authenticated_proxy_request_total",
+			"Request counter for DevProd's edge-preview-authenticated-proxy service"
+		);
+		requestCounter.inc();
+
 		const sentry = new Toucan({
 			dsn: env.SENTRY_DSN,
 			context: ctx,
@@ -374,6 +423,13 @@ export default {
 				return e.toResponse();
 			} else {
 				sentry.captureException(e);
+				const errorCounter = registry.create(
+					"counter",
+					"devprod_edge_preview_authenticated_proxy_error_total",
+					"Error counter for DevProd's edge-preview-authenticated-proxy service"
+				);
+				errorCounter.inc();
+
 				return Response.json(
 					{
 						error: "UnexpectedError",
@@ -384,6 +440,16 @@ export default {
 					}
 				);
 			}
+		} finally {
+			ctx.waitUntil(
+				fetch("https://workers-logging.cfdata.org/prometheus", {
+					method: "POST",
+					headers: {
+						Authorization: `Bearer ${env.PROMETHEUS_TOKEN}`,
+					},
+					body: registry.metrics(),
+				})
+			);
 		}
 	},
 };

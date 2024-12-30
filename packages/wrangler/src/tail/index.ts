@@ -1,13 +1,11 @@
 import { setTimeout } from "node:timers/promises";
 import onExit from "signal-exit";
-
-import { fetchResult, fetchScriptContent } from "../cfetch";
-import { readConfig } from "../config";
-import { confirm } from "../dialogs";
+import { configFileName, readConfig } from "../config";
+import { createFatalError, UserError } from "../errors";
 import {
+	getLegacyScriptName,
 	isLegacyEnv,
 	printWranglerBanner,
-	getLegacyScriptName,
 } from "../index";
 import { logger } from "../logger";
 import * as metrics from "../metrics";
@@ -19,13 +17,12 @@ import {
 	prettyPrintLogs,
 	translateCLICommandToFilterMessage,
 } from "./createTail";
-import type { WorkerMetadata } from "../deployment-bundle/create-worker-upload-form";
 import type {
 	CommonYargsArgv,
 	StrictYargsOptionsToInterface,
 } from "../yargs-types";
 import type { TailCLIFilters } from "./createTail";
-import type { RawData } from "ws";
+import type WebSocket from "ws";
 
 export function tailOptions(yargs: CommonYargsArgv) {
 	return yargs
@@ -70,6 +67,11 @@ export function tailOptions(yargs: CommonYargsArgv) {
 				'Filter by the IP address the request originates from. Use "self" to filter for your own IP',
 			array: true,
 		})
+		.option("version-id", {
+			type: "string",
+			requiresArg: true,
+			describe: "Filter by Worker version",
+		})
 		.option("debug", {
 			type: "boolean",
 			hidden: true,
@@ -81,11 +83,6 @@ export function tailOptions(yargs: CommonYargsArgv) {
 			type: "boolean",
 			describe: "Use legacy environments",
 			hidden: true,
-		})
-		.option("yes", {
-			type: "boolean",
-			describe: "Answer yes to any prompts",
-			alias: "y",
 		});
 }
 
@@ -95,16 +92,30 @@ export async function tailHandler(args: TailArgs) {
 	if (args.format === "pretty") {
 		await printWranglerBanner();
 	}
-	const config = readConfig(args.config, args);
-	await metrics.sendMetricsEvent("begin log stream", {
+	const config = readConfig(args);
+	if (config.pages_build_output_dir) {
+		throw new UserError(
+			"It looks like you've run a Workers-specific command in a Pages project.\n" +
+				"For Pages, please run `wrangler pages deployment tail` instead."
+		);
+	}
+	metrics.sendMetricsEvent("begin log stream", {
 		sendMetrics: config.send_metrics,
 	});
 
 	let scriptName;
 
+	const accountId = await requireAuth(config);
+
 	// Worker names can't contain "." (and most routes should), so use that as a discriminator
 	if (args.worker?.includes(".")) {
-		scriptName = await getWorkerForZone(args.worker);
+		scriptName = await getWorkerForZone(
+			{
+				worker: args.worker,
+				accountId,
+			},
+			config.configPath
+		);
 		if (args.format === "pretty") {
 			logger.log(`Connecting to worker ${scriptName} at route ${args.worker}`);
 		}
@@ -113,12 +124,10 @@ export async function tailHandler(args: TailArgs) {
 	}
 
 	if (!scriptName) {
-		throw new Error(
-			"Required Worker name missing. Please specify the Worker name in wrangler.toml, or pass it as an argument with `wrangler tail <worker-name>`"
+		throw new UserError(
+			`Required Worker name missing. Please specify the Worker name in your ${configFileName(config.configPath)} file, or pass it as an argument with \`wrangler tail <worker-name>\``
 		);
 	}
-
-	const accountId = await requireAuth(config);
 
 	const cliFilters: TailCLIFilters = {
 		status: args.status as ("ok" | "error" | "canceled")[] | undefined,
@@ -127,30 +136,9 @@ export async function tailHandler(args: TailArgs) {
 		samplingRate: args.samplingRate,
 		search: args.search,
 		clientIp: args.ip,
+		versionId: args.versionId,
 	};
-	const scriptContent: string = await fetchScriptContent(
-		(!isLegacyEnv(config) ? args.env : undefined)
-			? `/accounts/${accountId}/workers/services/${scriptName}/environments/${args.env}/content`
-			: `/accounts/${accountId}/workers/scripts/${scriptName}`
-	);
 
-	const bindings = await fetchResult<WorkerMetadata["bindings"]>(
-		(!isLegacyEnv(config) ? args.env : undefined)
-			? `/accounts/${accountId}/workers/services/${scriptName}/environments/${args.env}/bindings`
-			: `/accounts/${accountId}/workers/scripts/${scriptName}/bindings`
-	);
-	if (
-		scriptContent.toLowerCase().includes("websocket") &&
-		bindings.find((b) => b.type === "durable_object_namespace")
-	) {
-		logger.warn(
-			`Beginning log collection requires restarting the Durable Objects associated with ${scriptName}. Any WebSocket connections or other non-persisted state will be lost as part of this restart.`
-		);
-
-		if (!args.yes && !(await confirm("Would you like to continue?"))) {
-			return;
-		}
-	}
 	const filters = translateCLICommandToFilterMessage(cliFilters);
 
 	const { tail, expiration, deleteTail } = await createTail(
@@ -171,15 +159,7 @@ export async function tailHandler(args: TailArgs) {
 		);
 	}
 
-	onExit(async () => {
-		tail.terminate();
-		await deleteTail();
-		await metrics.sendMetricsEvent("end log stream", {
-			sendMetrics: config.send_metrics,
-		});
-	});
-
-	const printLog: (data: RawData) => void =
+	const printLog: (data: WebSocket.RawData) => void =
 		args.format === "pretty" ? prettyPrintLogs : jsonPrintLogs;
 
 	tail.on("message", printLog);
@@ -193,7 +173,7 @@ export async function tailHandler(args: TailArgs) {
 				await setTimeout(100);
 				break;
 			case tail.CLOSED:
-				await metrics.sendMetricsEvent("end log stream", {
+				metrics.sendMetricsEvent("end log stream", {
 					sendMetrics: config.send_metrics,
 				});
 				throw new Error(
@@ -206,11 +186,59 @@ export async function tailHandler(args: TailArgs) {
 		logger.log(`Connected to ${scriptDisplayName}, waiting for logs...`);
 	}
 
-	tail.on("close", async () => {
+	const cancelPing = startWebSocketPing();
+	tail.on("close", exit);
+	onExit(exit);
+
+	async function exit() {
+		cancelPing();
 		tail.terminate();
 		await deleteTail();
-		await metrics.sendMetricsEvent("end log stream", {
+		metrics.sendMetricsEvent("end log stream", {
 			sendMetrics: config.send_metrics,
 		});
-	});
+	}
+
+	/**
+	 * Start pinging the websocket to see if it is still connected.
+	 *
+	 * We need to know if the connection to the tail drops.
+	 * To do this we send a ping message to the backend every few seconds.
+	 * If we don't get a matching pong message back before the next ping is due
+	 * then we have probably lost the connect.
+	 */
+	function startWebSocketPing() {
+		/** The corelation message to send to tail when pinging. */
+		const PING_MESSAGE = Buffer.from("wrangler tail ping");
+		/** How long to wait between pings. */
+		const PING_INTERVAL = 10000;
+
+		let waitingForPong = false;
+
+		const pingInterval = setInterval(() => {
+			if (waitingForPong) {
+				// We didn't get a pong back quickly enough so assume the connection died and exit.
+				// This approach relies on the fact that throwing an error inside a `setInterval()` callback
+				// causes the process to exit.
+				// This is a bit nasty but otherwise we have to make wholesale changes to how the `tail` command
+				// works, since currently all the tests assume that `runWrangler()` will return immediately.
+				console.log(args.format);
+				throw createFatalError(
+					"Tail disconnected, exiting.",
+					args.format === "json",
+					1
+				);
+			}
+			waitingForPong = true;
+			tail.ping(PING_MESSAGE);
+		}, PING_INTERVAL);
+
+		tail.on("pong", (data) => {
+			if (data.equals(PING_MESSAGE)) {
+				waitingForPong = false;
+			}
+		});
+
+		return () => clearInterval(pingInterval);
+	}
 }

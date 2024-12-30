@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { env } from "node:process";
 import { execa, execaCommandSync } from "execa";
+import { UserError } from "./errors";
 import { logger } from "./logger";
 
 export interface PackageManager {
@@ -86,7 +87,7 @@ export async function getPackageManager(cwd: string): Promise<PackageManager> {
 		logger.log("Using pnpm as package manager.");
 		return { ...PnpmPackageManager, cwd };
 	} else {
-		throw new Error(
+		throw new UserError(
 			"Unable to find a package manager. Supported managers are: npm, yarn, and pnpm."
 		);
 	}
@@ -199,7 +200,7 @@ function supportsPnpm(): Promise<boolean> {
  * - [pnpm](https://github.com/pnpm/pnpm/blob/cd4f9341e966eb8b411462b48ff0c0612e0a51a7/packages/plugin-commands-script-runners/src/makeEnv.ts#L14)
  * - [yarn](https://yarnpkg.com/advanced/lifecycle-scripts#environment-variables)
  */
-function sniffUserAgent(): "npm" | "pnpm" | "yarn" | undefined {
+export function sniffUserAgent(): "npm" | "pnpm" | "yarn" | undefined {
 	const userAgent = env.npm_config_user_agent;
 	if (userAgent === undefined) {
 		return undefined;

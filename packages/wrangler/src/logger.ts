@@ -3,7 +3,10 @@ import chalk from "chalk";
 import CLITable from "cli-table3";
 import { formatMessagesSync } from "esbuild";
 import { getEnvironmentVariableFactory } from "./environment-variables/factory";
+import { getSanitizeLogs } from "./environment-variables/misc-variables";
+import { appendToDebugLogFile } from "./utils/log-file";
 import type { Message } from "esbuild";
+
 export const LOGGER_LEVELS = {
 	none: -1,
 	error: 0,
@@ -31,11 +34,13 @@ const getLogLevelFromEnv = getEnvironmentVariableFactory({
 function getLoggerLevel(): LoggerLevel {
 	const fromEnv = getLogLevelFromEnv()?.toLowerCase();
 	if (fromEnv !== undefined) {
-		if (fromEnv in LOGGER_LEVELS) return fromEnv as LoggerLevel;
+		if (fromEnv in LOGGER_LEVELS) {
+			return fromEnv as LoggerLevel;
+		}
 		const expected = Object.keys(LOGGER_LEVELS)
 			.map((level) => `"${level}"`)
 			.join(" | ");
-		console.warn(
+		logger.once.warn(
 			`Unrecognised WRANGLER_LOG value ${JSON.stringify(
 				fromEnv
 			)}, expected ${expected}, defaulting to "log"...`
@@ -49,10 +54,29 @@ export type TableRow<Keys extends string> = Record<Keys, string>;
 export class Logger {
 	constructor() {}
 
-	loggerLevel = getLoggerLevel();
+	private overrideLoggerLevel?: LoggerLevel;
+
+	get loggerLevel() {
+		return this.overrideLoggerLevel ?? getLoggerLevel();
+	}
+
+	set loggerLevel(val) {
+		this.overrideLoggerLevel = val;
+	}
+
 	columns = process.stdout.columns;
 
 	debug = (...args: unknown[]) => this.doLog("debug", args);
+	debugWithSanitization = (label: string, ...args: unknown[]) => {
+		if (getSanitizeLogs() === "false") {
+			this.doLog("debug", [label, ...args]);
+		} else {
+			this.doLog("debug", [
+				label,
+				"omitted; set WRANGLER_LOG_SANITIZE=false to include sanitized data",
+			]);
+		}
+	};
 	info = (...args: unknown[]) => this.doLog("info", args);
 	log = (...args: unknown[]) => this.doLog("log", args);
 	warn = (...args: unknown[]) => this.doLog("warn", args);
@@ -70,11 +94,64 @@ export class Logger {
 		t.push(...data.map((row) => keys.map((k) => row[k])));
 		return this.doLog("log", [t.toString()]);
 	}
+	console<M extends Exclude<keyof Console, "Console">>(
+		method: M,
+		...args: Parameters<Console[M]>
+	) {
+		if (typeof console[method] !== "function") {
+			throw new Error(`console.${method}() is not a function`);
+		}
+
+		Logger.#beforeLogHook?.();
+		(console[method] as (...args: unknown[]) => unknown).apply(console, args);
+		Logger.#afterLogHook?.();
+	}
+
+	static onceHistory = new Set();
+	get once() {
+		return {
+			info: (...args: unknown[]) => this.doLogOnce("info", args),
+			log: (...args: unknown[]) => this.doLogOnce("log", args),
+			warn: (...args: unknown[]) => this.doLogOnce("warn", args),
+			error: (...args: unknown[]) => this.doLogOnce("error", args),
+		};
+	}
+	doLogOnce(messageLevel: Exclude<LoggerLevel, "none">, args: unknown[]) {
+		// using this.constructor.onceHistory, instead of hard-coding Logger.onceHistory, allows for subclassing
+		const { onceHistory } = this.constructor as typeof Logger;
+
+		const cacheKey = `${messageLevel}: ${args.join(" ")}`;
+
+		if (!onceHistory.has(cacheKey)) {
+			onceHistory.add(cacheKey);
+			this.doLog(messageLevel, args);
+		}
+	}
 
 	private doLog(messageLevel: Exclude<LoggerLevel, "none">, args: unknown[]) {
-		if (LOGGER_LEVELS[this.loggerLevel] >= LOGGER_LEVELS[messageLevel]) {
-			console[messageLevel](this.formatMessage(messageLevel, format(...args)));
+		const message = this.formatMessage(messageLevel, format(...args));
+
+		// unless in unit-tests, send ALL logs to the debug log file (even non-debug logs for context & order)
+		const inUnitTests = typeof vitest !== "undefined";
+		if (!inUnitTests) {
+			void appendToDebugLogFile(messageLevel, message);
 		}
+
+		// only send logs to the terminal if their level is at least the configured log-level
+		if (LOGGER_LEVELS[this.loggerLevel] >= LOGGER_LEVELS[messageLevel]) {
+			Logger.#beforeLogHook?.();
+			console[messageLevel](message);
+			Logger.#afterLogHook?.();
+		}
+	}
+
+	static #beforeLogHook: (() => void) | undefined;
+	static registerBeforeLogHook(callback: (() => void) | undefined) {
+		this.#beforeLogHook = callback;
+	}
+	static #afterLogHook: (() => void) | undefined;
+	static registerAfterLogHook(callback: (() => void) | undefined) {
+		this.#afterLogHook = callback;
 	}
 
 	private formatMessage(
@@ -113,7 +190,9 @@ export const logger = new Logger();
 
 export function logBuildWarnings(warnings: Message[]) {
 	const logs = formatMessagesSync(warnings, { kind: "warning", color: true });
-	for (const log of logs) console.warn(log);
+	for (const log of logs) {
+		logger.console("warn", log);
+	}
 }
 
 /**
@@ -121,7 +200,13 @@ export function logBuildWarnings(warnings: Message[]) {
  * style esbuild would.
  */
 export function logBuildFailure(errors: Message[], warnings: Message[]) {
-	const logs = formatMessagesSync(errors, { kind: "error", color: true });
-	for (const log of logs) console.error(log);
+	if (errors.length > 0) {
+		const logs = formatMessagesSync(errors, { kind: "error", color: true });
+		const errorStr = errors.length > 1 ? "errors" : "error";
+		logger.error(
+			`Build failed with ${errors.length} ${errorStr}:\n` + logs.join("\n")
+		);
+	}
+
 	logBuildWarnings(warnings);
 }

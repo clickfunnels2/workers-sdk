@@ -6,12 +6,13 @@ import { pathToFileURL } from "url";
 import { TextDecoder, TextEncoder } from "util";
 import { parse } from "acorn";
 import { simple } from "acorn-walk";
-import type estree from "estree";
 import { dim } from "kleur/colors";
 import { z } from "zod";
 import { Worker_Module } from "../../runtime";
-import { MiniflareCoreError, globsToRegExps } from "../../shared";
+import { globsToRegExps, MiniflareCoreError, PathSchema } from "../../shared";
 import { MatcherRegExps, testRegExps } from "../../workers";
+import { getNodeCompat, NodeJSCompatMode } from "./node-compat";
+import type estree from "estree";
 
 const SUGGEST_BUNDLE =
 	"If you're trying to import an npm package, you'll need to bundle your Worker first.";
@@ -46,6 +47,8 @@ export const ModuleRuleTypeSchema = z.enum([
 	"Text",
 	"Data",
 	"CompiledWasm",
+	"PythonModule",
+	"PythonRequirement",
 ]);
 export type ModuleRuleType = z.infer<typeof ModuleRuleTypeSchema>;
 
@@ -61,7 +64,7 @@ export type ModuleRule = z.infer<typeof ModuleRuleSchema>;
 // Manually defined module
 export const ModuleDefinitionSchema = z.object({
 	type: ModuleRuleTypeSchema,
-	path: z.string(),
+	path: PathSchema,
 	contents: z.string().or(z.instanceof(Uint8Array)).optional(),
 });
 export type ModuleDefinition = z.infer<typeof ModuleDefinitionSchema>;
@@ -73,12 +76,12 @@ export const SourceOptionsSchema = z.union([
 		modules: z.array(ModuleDefinitionSchema),
 		// `modules` "name"s will be their paths relative to this value.
 		// This ensures file paths in stack traces are correct.
-		modulesRoot: z.string().optional(),
+		modulesRoot: PathSchema.optional(),
 	}),
 	z.object({
 		script: z.string(),
 		// Optional script path for resolving modules, and stack traces file names
-		scriptPath: z.string().optional(),
+		scriptPath: PathSchema.optional(),
 		// Automatically collect modules by parsing `script` if `true`, or treat as
 		// service-worker if `false`
 		modules: z.boolean().optional(),
@@ -86,10 +89,10 @@ export const SourceOptionsSchema = z.union([
 		modulesRules: z.array(ModuleRuleSchema).optional(),
 		// `modules` "name"s will be their paths relative to this value.
 		// This ensures file paths in stack traces are correct.
-		modulesRoot: z.string().optional(),
+		modulesRoot: PathSchema.optional(),
 	}),
 	z.object({
-		scriptPath: z.string(),
+		scriptPath: PathSchema,
 		// Automatically collect modules by parsing `scriptPath` if `true`, or treat
 		// as service-worker if `false`
 		modules: z.boolean().optional(),
@@ -97,7 +100,7 @@ export const SourceOptionsSchema = z.union([
 		modulesRules: z.array(ModuleRuleSchema).optional(),
 		// `modules` "name"s will be their paths relative to this value.
 		// This ensures file paths in stack traces are correct.
-		modulesRoot: z.string().optional(),
+		modulesRoot: PathSchema.optional(),
 	}),
 ]);
 export type SourceOptions = z.infer<typeof SourceOptionsSchema>;
@@ -107,15 +110,15 @@ const DEFAULT_MODULE_RULES: ModuleRule[] = [
 	{ type: "CommonJS", include: ["**/*.js", "**/*.cjs"] },
 ];
 
-interface CompiledModuleRule {
+export interface CompiledModuleRule {
 	type: ModuleRuleType;
 	include: MatcherRegExps;
 }
 
-function compileModuleRules(rules?: ModuleRule[]) {
+export function compileModuleRules(rules: ModuleRule[]) {
 	const compiledRules: CompiledModuleRule[] = [];
 	const finalisedTypes = new Set<ModuleRuleType>();
-	for (const rule of [...(rules ?? []), ...DEFAULT_MODULE_RULES]) {
+	for (const rule of rules) {
 		// Ignore rule if type didn't enable fallthrough
 		if (finalisedTypes.has(rule.type)) continue;
 		compiledRules.push({
@@ -154,26 +157,27 @@ function getResolveErrorPrefix(referencingPath: string): string {
 
 export class ModuleLocator {
 	readonly #compiledRules: CompiledModuleRule[];
-	readonly #nodejsCompat: boolean;
+	readonly #nodejsCompatMode: NodeJSCompatMode;
 	readonly #visitedPaths = new Set<string>();
 	readonly modules: Worker_Module[] = [];
 
 	constructor(
 		private readonly modulesRoot: string,
 		private readonly additionalModuleNames: string[],
-		rules?: ModuleRule[],
+		rules: ModuleRule[] = [],
+		compatibilityDate?: string,
 		compatibilityFlags?: string[]
 	) {
+		// Implicit shallow-copy to avoid mutating argument
+		rules = rules.concat(DEFAULT_MODULE_RULES);
 		this.#compiledRules = compileModuleRules(rules);
-		// `nodejs_compat` doesn't have a default-on date, so we know whether it's
-		// enabled just by looking at flags:
-		// https://github.com/cloudflare/workerd/blob/edcd0300bc7b8f56040d090177db947edd22f91b/src/workerd/io/compatibility-date.capnp#L237-L240
-		this.#nodejsCompat = compatibilityFlags?.includes("nodejs_compat") ?? false;
+		this.#nodejsCompatMode = getNodeCompat(
+			compatibilityDate,
+			compatibilityFlags ?? []
+		).mode;
 	}
 
 	visitEntrypoint(code: string, modulePath: string) {
-		modulePath = path.resolve(this.modulesRoot, modulePath);
-
 		// If we've already visited this path, return
 		if (this.#visitedPaths.has(modulePath)) return;
 		this.#visitedPaths.add(modulePath);
@@ -244,7 +248,7 @@ export class ModuleLocator {
 						) {
 							this.#visitModule(modulePath, name, type, argument);
 						}
-				  },
+					},
 		};
 		simple(root, visitors as Record<string, (node: any) => void>);
 	}
@@ -255,14 +259,6 @@ export class ModuleLocator {
 		referencingType: JavaScriptModuleRuleType,
 		specExpression: estree.Expression | estree.SpreadElement
 	) {
-		if (maybeGetStringScriptPathIndex(referencingName) !== undefined) {
-			const prefix = getResolveErrorPrefix(referencingPath);
-			throw new MiniflareCoreError(
-				"ERR_MODULE_STRING_SCRIPT",
-				`${prefix}: imports are unsupported in string \`script\` without defined \`scriptPath\``
-			);
-		}
-
 		// Ensure spec is a static string literal, and resolve full module identifier
 		if (
 			specExpression.type !== "Literal" ||
@@ -295,17 +291,32 @@ ${dim(modulesConfig)}`;
 		}
 		const spec = specExpression.value;
 
-		// `node:` (assuming `nodejs_compat` flag enabled), `cloudflare:` and
-		// `workerd:` imports don't need to be included explicitly
 		const isNodeJsCompatModule = referencingType === "NodeJsCompatModule";
 		if (
-			(this.#nodejsCompat && spec.startsWith("node:")) ||
+			// `cloudflare:` and `workerd:` imports don't need to be included explicitly
 			spec.startsWith("cloudflare:") ||
 			spec.startsWith("workerd:") ||
-			(isNodeJsCompatModule && builtinModulesWithPrefix.includes(spec)) ||
+			// Node.js compat v1 requires imports to be prefixed with `node:`
+			(this.#nodejsCompatMode === "v1" && spec.startsWith("node:")) ||
+			// Node.js compat modules and v2 can also handle non-prefixed imports
+			((this.#nodejsCompatMode === "v2" || isNodeJsCompatModule) &&
+				builtinModulesWithPrefix.includes(spec)) ||
+			// Async Local Storage mode (node_als) only deals with `node:async_hooks` imports
+			(this.#nodejsCompatMode === "als" && spec === "node:async_hooks") ||
+			// Any "additional" external modules can be ignored
 			this.additionalModuleNames.includes(spec)
 		) {
 			return;
+		}
+
+		// If this isn't a built-in module, and this is a string script without
+		// a path, we won't be able to resolve it
+		if (maybeGetStringScriptPathIndex(referencingName) !== undefined) {
+			const prefix = getResolveErrorPrefix(referencingPath);
+			throw new MiniflareCoreError(
+				"ERR_MODULE_STRING_SCRIPT",
+				`${prefix}: imports are unsupported in string \`script\` without defined \`scriptPath\``
+			);
 		}
 
 		const identifier = path.resolve(path.dirname(referencingPath), spec);
@@ -346,6 +357,12 @@ ${dim(modulesConfig)}`;
 				break;
 			case "CompiledWasm":
 				this.modules.push({ name, wasm: data });
+				break;
+			case "PythonModule":
+				this.modules.push({ name, pythonModule: data.toString("utf-8") });
+				break;
+			case "PythonRequirement":
+				this.modules.push({ name, pythonRequirement: data.toString("utf-8") });
 				break;
 			default:
 				// `type` should've been validated against `ModuleRuleTypeSchema`
@@ -405,6 +422,10 @@ export function convertModuleDefinition(
 			return { name, data: contentsToArray(contents) };
 		case "CompiledWasm":
 			return { name, wasm: contentsToArray(contents) };
+		case "PythonModule":
+			return { name, pythonModule: contentsToString(contents) };
+		case "PythonRequirement":
+			return { name, pythonRequirement: contentsToString(contents) };
 		default:
 			// `type` should've been validated against `ModuleRuleTypeSchema`
 			const exhaustive: never = def.type;
@@ -425,10 +446,15 @@ function convertWorkerModule(mod: Worker_Module): ModuleDefinition {
 	else if ("text" in m) return { path, type: "Text" };
 	else if ("data" in m) return { path, type: "Data" };
 	else if ("wasm" in m) return { path, type: "CompiledWasm" };
+	else if ("pythonModule" in m) return { path, type: "PythonModule" };
+	else if ("pythonRequirement" in m) return { path, type: "PythonRequirement" };
 
 	// This function is only used for building error messages including
 	// generated modules, and these are the types we generate.
-	assert(!("json" in m), "Unreachable: json modules aren't generated");
+	assert(
+		!("json" in m || "fallbackService" in m),
+		"Unreachable: json or fallbackService modules aren't generated"
+	);
 	const exhaustive: never = m;
 	assert.fail(
 		`Unreachable: [${Object.keys(exhaustive).join(

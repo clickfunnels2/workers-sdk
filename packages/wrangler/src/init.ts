@@ -1,27 +1,37 @@
 import * as fs from "node:fs";
-import { writeFile, mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path, { dirname } from "node:path";
 import TOML from "@iarna/toml";
 import { execa } from "execa";
 import { findUp } from "find-up";
 import { version as wranglerVersion } from "../package.json";
-
+import { assertNever } from "./api/startDevWorker/utils";
 import { fetchResult } from "./cfetch";
-import { fetchDashboardScript } from "./cfetch/internal";
+import { fetchWorker } from "./cfetch/internal";
 import { readConfig } from "./config";
+import { getDatabaseInfoFromId } from "./d1/utils";
 import { confirm, select } from "./dialogs";
 import { getC3CommandFromEnv } from "./environment-variables/misc-variables";
-import { initializeGit, getGitVersioon, isInsideGitRepo } from "./git-client";
+import { CommandLineArgsError, FatalError, UserError } from "./errors";
+import { getGitVersioon, initializeGit, isInsideGitRepo } from "./git-client";
 import { logger } from "./logger";
+import { readMetricsConfig } from "./metrics/metrics-config";
 import { getPackageManager } from "./package-manager";
 import { parsePackageJSON, parseTOML, readFileSync } from "./parse";
 import { getBasePath } from "./paths";
 import { requireAuth } from "./user";
+import { createBatches } from "./utils/create-batches";
 import * as shellquote from "./utils/shell-quote";
-import { CommandLineArgsError, printWranglerBanner } from "./index";
-
+import { printWranglerBanner } from "./index";
 import type { RawConfig } from "./config";
-import type { Route, SimpleRoute, TailConsumer } from "./config/environment";
+import type {
+	CustomDomainRoute,
+	Observability,
+	Route,
+	TailConsumer,
+	ZoneNameRoute,
+} from "./config/environment";
+import type { DatabaseInfo } from "./d1/types";
 import type {
 	WorkerMetadata,
 	WorkerMetadataBinding,
@@ -68,6 +78,7 @@ export function initOptions(yargs: CommonYargsArgv) {
 			type: "boolean",
 			hidden: true,
 			default: true,
+			alias: "c3",
 		});
 }
 
@@ -88,10 +99,15 @@ export type ServiceMetadataRes = {
 			created_on: string;
 			migration_tag: string;
 			usage_model: "bundled" | "unbound";
+			limits: {
+				cpu_ms: number;
+			};
 			compatibility_date: string;
+			compatibility_flags: string[];
 			last_deployed_from?: "wrangler" | "dash" | "api";
 			placement_mode?: "smart";
 			tail_consumers?: TailConsumer[];
+			observability?: Observability;
 		};
 	};
 	created_on: string;
@@ -102,23 +118,38 @@ export type ServiceMetadataRes = {
 			environment: string;
 			created_on: string;
 			modified_on: string;
-		}
+		},
 	];
 };
 
-export type RawSimpleRoute = { pattern: string };
-export type RawRoutes = (RawSimpleRoute | Exclude<Route, SimpleRoute>) & {
+type RoutesRes = {
 	id: string;
-};
-export type RoutesRes = RawRoutes[];
+	pattern: string;
+	zone_name: string;
+	script: string;
+}[];
 
-export type CronTriggersRes = {
+type CustomDomainsRes = {
+	id: string;
+	zone_id: string;
+	zone_name: string;
+	hostname: string;
+	service: string;
+	environment: string;
+	cert_id: string;
+}[];
+
+type WorkersDevRes = {
+	enabled: boolean;
+	previews_enabled: boolean;
+};
+type CronTriggersRes = {
 	schedules: [
 		{
 			cron: string;
 			created_on: Date;
 			modified_on: Date;
-		}
+		},
 	];
 };
 
@@ -133,10 +164,10 @@ export async function initHandler(args: InitArgs) {
 	const devDepsToInstall: string[] = [];
 	const instructions: string[] = [];
 	let shouldRunPackageManagerInstall = false;
-	const fromDashScriptName = args.fromDash;
+	const fromDashWorkerName = args.fromDash;
 	const creationDirectory = path.resolve(
 		process.cwd(),
-		(args.name ? args.name : fromDashScriptName) ?? ""
+		(args.name ? args.name : fromDashWorkerName) ?? ""
 	);
 
 	assertNoTypeArg(args);
@@ -161,59 +192,47 @@ export async function initHandler(args: InitArgs) {
 	let justCreatedWranglerToml = false;
 
 	let accountId = "";
-	let serviceMetadata: undefined | ServiceMetadataRes;
 
 	// If --from-dash, check that script actually exists
-	/*
-    Even though the init command is now deprecated and replaced by Create Cloudflare CLI (C3),
-    run this first so, if the script doesn't exist, we can fail early
-  */
-	if (fromDashScriptName) {
-		const config = readConfig(args.config, args);
-		accountId = await requireAuth(config);
-		try {
-			serviceMetadata = await fetchResult<ServiceMetadataRes>(
-				`/accounts/${accountId}/workers/services/${fromDashScriptName}`
-			);
-		} catch (err) {
-			if ((err as { code?: number }).code === 10090) {
-				throw new Error(
-					"wrangler couldn't find a Worker script with that name in your account.\nRun `wrangler whoami` to confirm you're logged into the correct account."
-				);
-			}
-			throw err;
-		}
-
+	if (fromDashWorkerName) {
 		const c3Arguments = [
 			...shellquote.parse(getC3CommandFromEnv()),
-			fromDashScriptName,
+			fromDashWorkerName,
 			...(yesFlag && isNpm(packageManager) ? ["-y"] : []), // --yes arg for npx
 			...(isNpm(packageManager) ? ["--"] : []),
-			"--type",
-			"pre-existing",
 			"--existing-script",
-			fromDashScriptName,
+			fromDashWorkerName,
 		];
 
 		if (yesFlag) {
 			c3Arguments.push("--wrangler-defaults");
 		}
 
-		// Deprecate the `init --from-dash` command
 		const replacementC3Command = `\`${packageManager.type} ${c3Arguments.join(
 			" "
 		)}\``;
-		logger.warn(
-			`The \`init --from-dash\` command is no longer supported. Please use ${replacementC3Command} instead.\nThe \`init\` command will be removed in a future version.`
-		);
-
 		// C3 will run wrangler with the --do-not-delegate flag to communicate with the API
 		if (args.delegateC3) {
-			logger.log(`Running ${replacementC3Command}...`);
+			logger.log(`🌀 Running ${replacementC3Command}...`);
 
 			await execa(packageManager.type, c3Arguments, { stdio: "inherit" });
 
 			return;
+		} else {
+			const config = readConfig(args);
+			accountId = await requireAuth(config);
+			try {
+				await fetchResult<ServiceMetadataRes>(
+					`/accounts/${accountId}/workers/services/${fromDashWorkerName}`
+				);
+			} catch (err) {
+				if ((err as { code?: number }).code === 10090) {
+					throw new UserError(
+						"wrangler couldn't find a Worker script with that name in your account.\nRun `wrangler whoami` to confirm you're logged into the correct account."
+					);
+				}
+				throw err;
+			}
 		}
 	}
 
@@ -222,7 +241,7 @@ export async function initHandler(args: InitArgs) {
 		logger.warn(
 			`${path.relative(process.cwd(), wranglerTomlDestination)} already exists!`
 		);
-		if (!fromDashScriptName) {
+		if (!fromDashWorkerName) {
 			shouldContinue = await confirm(
 				"Do you want to continue initializing this project?"
 			);
@@ -231,10 +250,7 @@ export async function initHandler(args: InitArgs) {
 			return;
 		}
 	} else {
-		// Deprecate the `init` command
-		//    if a wrangler.toml file does not exist (C3 expects to scaffold *new* projects)
-		//    and if --from-dash is not set (C3 will run wrangler to communicate with the API)
-		if (!fromDashScriptName) {
+		if (!fromDashWorkerName) {
 			const c3Arguments: string[] = [];
 
 			if (args.name) {
@@ -255,20 +271,24 @@ export async function initHandler(args: InitArgs) {
 
 			c3Arguments.unshift(...shellquote.parse(getC3CommandFromEnv()));
 
-			// Deprecate the `init --from-dash` command
 			const replacementC3Command = `\`${packageManager.type} ${shellquote.quote(
 				c3Arguments
 			)}\``;
 
-			logger.warn(
-				`The \`init\` command is no longer supported. Please use ${replacementC3Command} instead.\nThe \`init\` command will be removed in a future version.`
-			);
-
 			if (args.delegateC3) {
-				logger.log(`Running ${replacementC3Command}...`);
+				logger.log(
+					`The \`init\` command now delegates to \`create-cloudflare\` instead. You can use the \`--no-c3\` flag to access the old implementation.\n`
+				);
+				logger.log(`🌀 Running ${replacementC3Command}...`);
+
+				// if telemetry is disabled in wrangler, prevent c3 from sending metrics too
+				const metricsConfig = readMetricsConfig();
 
 				await execa(packageManager.type, c3Arguments, {
 					stdio: "inherit",
+					...(metricsConfig.permission?.enabled === false && {
+						env: { CREATE_CLOUDFLARE_TELEMETRY_DISABLED: "1" },
+					}),
 				});
 
 				return;
@@ -316,7 +336,7 @@ export async function initHandler(args: InitArgs) {
 					? `✨ Initialized git repository at ${path.relative(
 							process.cwd(),
 							creationDirectory
-					  )}`
+						)}`
 					: `✨ Initialized git repository`
 			);
 		}
@@ -396,49 +416,54 @@ export async function initHandler(args: InitArgs) {
 		creationDirectory,
 		"tsconfig.json"
 	);
-	if (!pathToTSConfig) {
-		// If there's no tsconfig, offer to create one
-		// and install @cloudflare/workers-types
-		if (yesFlag || (await confirm("Would you like to use TypeScript?"))) {
-			isTypescriptProject = true;
-			await writeFile(
-				path.join(creationDirectory, "./tsconfig.json"),
-				readFileSync(path.join(getBasePath(), "templates/tsconfig.init.json"))
-			);
-			devDepsToInstall.push("@cloudflare/workers-types");
-			devDepsToInstall.push("typescript");
-			pathToTSConfig = path.join(creationDirectory, "tsconfig.json");
-			logger.log(`✨ Created ${path.relative(process.cwd(), pathToTSConfig)}`);
-		}
-	} else {
-		isTypescriptProject = true;
-		// If there's a tsconfig, check if @cloudflare/workers-types
-		// is already installed, and offer to install it if not
-		const packageJson = parsePackageJSON(
-			readFileSync(pathToPackageJson),
-			pathToPackageJson
-		);
-		if (
-			!(
-				packageJson.devDependencies?.["@cloudflare/workers-types"] ||
-				packageJson.dependencies?.["@cloudflare/workers-types"]
-			)
-		) {
-			const shouldInstall = await confirm(
-				"Would you like to install the type definitions for Workers into your package.json?"
-			);
-			if (shouldInstall) {
-				devDepsToInstall.push("@cloudflare/workers-types");
-				// We don't update the tsconfig.json because
-				// it could be complicated in existing projects
-				// and we don't want to break them. Instead, we simply
-				// tell the user that they need to update their tsconfig.json
-				instructions.push(
-					`🚨 Please add "@cloudflare/workers-types" to compilerOptions.types in ${path.relative(
-						process.cwd(),
-						pathToTSConfig
-					)}`
+	// If we're coming from the dash, the worker is always Javascript
+	if (!fromDashWorkerName) {
+		if (!pathToTSConfig) {
+			// If there's no tsconfig, offer to create one
+			// and install @cloudflare/workers-types
+			if (yesFlag || (await confirm("Would you like to use TypeScript?"))) {
+				isTypescriptProject = true;
+				await writeFile(
+					path.join(creationDirectory, "./tsconfig.json"),
+					readFileSync(path.join(getBasePath(), "templates/tsconfig.init.json"))
 				);
+				devDepsToInstall.push("@cloudflare/workers-types");
+				devDepsToInstall.push("typescript");
+				pathToTSConfig = path.join(creationDirectory, "tsconfig.json");
+				logger.log(
+					`✨ Created ${path.relative(process.cwd(), pathToTSConfig)}`
+				);
+			}
+		} else {
+			isTypescriptProject = true;
+			// If there's a tsconfig, check if @cloudflare/workers-types
+			// is already installed, and offer to install it if not
+			const packageJson = parsePackageJSON(
+				readFileSync(pathToPackageJson),
+				pathToPackageJson
+			);
+			if (
+				!(
+					packageJson.devDependencies?.["@cloudflare/workers-types"] ||
+					packageJson.dependencies?.["@cloudflare/workers-types"]
+				)
+			) {
+				const shouldInstall = await confirm(
+					"Would you like to install the type definitions for Workers into your package.json?"
+				);
+				if (shouldInstall) {
+					devDepsToInstall.push("@cloudflare/workers-types");
+					// We don't update the tsconfig.json because
+					// it could be complicated in existing projects
+					// and we don't want to break them. Instead, we simply
+					// tell the user that they need to update their tsconfig.json
+					instructions.push(
+						`🚨 Please add "@cloudflare/workers-types" to compilerOptions.types in ${path.relative(
+							process.cwd(),
+							pathToTSConfig
+						)}`
+					);
+				}
 			}
 		}
 	}
@@ -512,7 +537,7 @@ export async function initHandler(args: InitArgs) {
 			);
 			instructions.push(
 				`\nTo start developing your Worker, run \`${
-					isNamedWorker ? `cd ${args.name || fromDashScriptName} && ` : ""
+					isNamedWorker ? `cd ${args.name || fromDashWorkerName} && ` : ""
 				}npm start\``
 			);
 			if (isAddingTestScripts) {
@@ -534,119 +559,76 @@ export async function initHandler(args: InitArgs) {
 			);
 		}
 	}
-
 	if (isTypescriptProject) {
 		if (!fs.existsSync(path.join(creationDirectory, "./src/index.ts"))) {
 			const newWorkerFilename = path.relative(
 				process.cwd(),
 				path.join(creationDirectory, "./src/index.ts")
 			);
-			if (fromDashScriptName) {
-				logger.warn(
-					"After running `wrangler init --from-dash`, modifying your worker via the Cloudflare dashboard is discouraged.\nEdits made via the Dashboard will not be synchronized locally and will be overridden by your local code and config when you deploy."
-				);
+
+			const newWorkerType = yesFlag
+				? "fetch"
+				: await getNewWorkerType(newWorkerFilename);
+
+			if (newWorkerType !== "none") {
+				const template = getNewWorkerTemplate("ts", newWorkerType);
 
 				await mkdir(path.join(creationDirectory, "./src"), {
 					recursive: true,
 				});
 
-				const defaultEnvironment =
-					serviceMetadata?.default_environment.environment;
-				// I want the default environment, assuming it's the most up to date code.
-				const dashScript = await fetchDashboardScript(
-					`/accounts/${accountId}/workers/services/${fromDashScriptName}/environments/${defaultEnvironment}/content`
+				await writeFile(
+					path.join(creationDirectory, "./src/index.ts"),
+					readFileSync(path.join(getBasePath(), `templates/${template}`))
 				);
 
-				// writeFile in small batches (of 10) to not exhaust system file descriptors
-				for (const files of createBatches(dashScript, 10)) {
-					await Promise.all(
-						files.map(async (file) => {
-							const filepath = path
-								.join(creationDirectory, `./src/${file.name}`)
-								.replace(/\.js$/, ".ts"); // change javascript extension to typescript extension
-							const directory = dirname(filepath);
+				logger.log(
+					`✨ Created ${path.relative(
+						process.cwd(),
+						path.join(creationDirectory, "./src/index.ts")
+					)}`
+				);
 
-							await mkdir(directory, { recursive: true });
-							await writeFile(filepath, file.stream() as ReadableStream);
-						})
+				shouldCreateTests =
+					yesFlag ||
+					(await confirm(
+						"Would you like us to write your first test with Vitest?"
+					));
+
+				if (shouldCreateTests) {
+					if (yesFlag) {
+						logger.info("Your project will use Vitest to run your tests.");
+					}
+
+					newWorkerTestType = "vitest";
+					devDepsToInstall.push(newWorkerTestType);
+
+					await writeFile(
+						path.join(creationDirectory, "./src/index.test.ts"),
+						readFileSync(
+							path.join(
+								getBasePath(),
+								`templates/init-tests/test-${newWorkerTestType}-new-worker.ts`
+							)
+						)
+					);
+					logger.log(
+						`✨ Created ${path.relative(
+							process.cwd(),
+							path.join(creationDirectory, "./src/index.test.ts")
+						)}`
 					);
 				}
 
 				await writePackageJsonScriptsAndUpdateWranglerToml({
 					isWritingScripts: shouldWritePackageJsonScripts,
+					isAddingTests: shouldCreateTests,
 					isCreatingWranglerToml: justCreatedWranglerToml,
 					packagePath: pathToPackageJson,
+					testRunner: newWorkerTestType,
 					scriptPath: "src/index.ts",
-					extraToml: (await getWorkerConfig(accountId, fromDashScriptName, {
-						defaultEnvironment,
-						environments: serviceMetadata?.environments,
-					})) as TOML.JsonMap,
+					extraToml: getNewWorkerToml(newWorkerType),
 				});
-			} else {
-				const newWorkerType = yesFlag
-					? "fetch"
-					: await getNewWorkerType(newWorkerFilename);
-
-				if (newWorkerType !== "none") {
-					const template = getNewWorkerTemplate("ts", newWorkerType);
-
-					await mkdir(path.join(creationDirectory, "./src"), {
-						recursive: true,
-					});
-
-					await writeFile(
-						path.join(creationDirectory, "./src/index.ts"),
-						readFileSync(path.join(getBasePath(), `templates/${template}`))
-					);
-
-					logger.log(
-						`✨ Created ${path.relative(
-							process.cwd(),
-							path.join(creationDirectory, "./src/index.ts")
-						)}`
-					);
-
-					shouldCreateTests =
-						yesFlag ||
-						(await confirm(
-							"Would you like us to write your first test with Vitest?"
-						));
-
-					if (shouldCreateTests) {
-						if (yesFlag) {
-							logger.info("Your project will use Vitest to run your tests.");
-						}
-
-						newWorkerTestType = "vitest";
-						devDepsToInstall.push(newWorkerTestType);
-
-						await writeFile(
-							path.join(creationDirectory, "./src/index.test.ts"),
-							readFileSync(
-								path.join(
-									getBasePath(),
-									`templates/init-tests/test-${newWorkerTestType}-new-worker.ts`
-								)
-							)
-						);
-						logger.log(
-							`✨ Created ${path.relative(
-								process.cwd(),
-								path.join(creationDirectory, "./src/index.test.ts")
-							)}`
-						);
-					}
-
-					await writePackageJsonScriptsAndUpdateWranglerToml({
-						isWritingScripts: shouldWritePackageJsonScripts,
-						isAddingTests: shouldCreateTests,
-						isCreatingWranglerToml: justCreatedWranglerToml,
-						packagePath: pathToPackageJson,
-						testRunner: newWorkerTestType,
-						scriptPath: "src/index.ts",
-						extraToml: getNewWorkerToml(newWorkerType),
-					});
-				}
 			}
 		}
 	} else {
@@ -656,25 +638,25 @@ export async function initHandler(args: InitArgs) {
 				path.join(creationDirectory, "./src/index.js")
 			);
 
-			if (fromDashScriptName) {
+			if (fromDashWorkerName) {
 				logger.warn(
 					"After running `wrangler init --from-dash`, modifying your worker via the Cloudflare dashboard is discouraged.\nEdits made via the Dashboard will not be synchronized locally and will be overridden by your local code and config when you deploy."
+				);
+
+				const { modules, config } = await downloadWorker(
+					accountId,
+					fromDashWorkerName
 				);
 
 				await mkdir(path.join(creationDirectory, "./src"), {
 					recursive: true,
 				});
 
-				const defaultEnvironment =
-					serviceMetadata?.default_environment.environment;
-
-				// I want the default environment, assuming it's the most up to date code.
-				const dashScript = await fetchDashboardScript(
-					`/accounts/${accountId}/workers/services/${fromDashScriptName}/environments/${defaultEnvironment}/content`
-				);
+				config.main = `src/${config.main}`;
+				config.name = workerName;
 
 				// writeFile in small batches (of 10) to not exhaust system file descriptors
-				for (const files of createBatches(dashScript, 10)) {
+				for (const files of createBatches(modules, 10)) {
 					await Promise.all(
 						files.map(async (file) => {
 							const filepath = path.join(
@@ -695,10 +677,7 @@ export async function initHandler(args: InitArgs) {
 					packagePath: pathToPackageJson,
 					scriptPath: "src/index.js",
 					//? Should we have Environment argument for `wrangler init --from-dash` - Jacob
-					extraToml: (await getWorkerConfig(accountId, fromDashScriptName, {
-						defaultEnvironment,
-						environments: serviceMetadata?.environments,
-					})) as TOML.JsonMap,
+					extraToml: config as TOML.JsonMap,
 				});
 			} else {
 				const newWorkerType = yesFlag
@@ -796,7 +775,7 @@ async function installPackages(
 	//lets install the devDeps they asked for
 	//and run their package manager's install command if needed
 	if (depsToInstall.length > 0) {
-		const formatter = new Intl.ListFormat("en", {
+		const formatter = new Intl.ListFormat("en-US", {
 			style: "long",
 			type: "conjunction",
 		});
@@ -852,7 +831,7 @@ async function getNewWorkerTestType(yesFlag?: boolean) {
 					},
 				],
 				defaultOption: 1,
-		  });
+			});
 }
 
 function getNewWorkerTemplate(
@@ -905,36 +884,45 @@ async function findPath(
 
 async function getWorkerConfig(
 	accountId: string,
-	fromDashScriptName: string,
-	{
-		defaultEnvironment,
-		environments,
-	}: {
-		defaultEnvironment: string | undefined;
-		environments: ServiceMetadataRes["environments"] | undefined;
-	}
+	workerName: string,
+	entrypoint: string,
+	serviceEnvironment: string
 ): Promise<RawConfig> {
-	const [bindings, routes, serviceEnvMetadata, cronTriggers] =
-		await Promise.all([
-			fetchResult<WorkerMetadata["bindings"]>(
-				`/accounts/${accountId}/workers/services/${fromDashScriptName}/environments/${defaultEnvironment}/bindings`
-			),
-			fetchResult<RoutesRes>(
-				`/accounts/${accountId}/workers/services/${fromDashScriptName}/environments/${defaultEnvironment}/routes`
-			),
-			fetchResult<ServiceMetadataRes["default_environment"]>(
-				`/accounts/${accountId}/workers/services/${fromDashScriptName}/environments/${defaultEnvironment}`
-			),
-			fetchResult<CronTriggersRes>(
-				`/accounts/${accountId}/workers/scripts/${fromDashScriptName}/schedules`
-			),
-		]).catch((e) => {
-			throw new Error(
-				`Error Occurred ${e}: Unable to fetch bindings, routes, or services metadata from the dashboard. Please try again later.`
-			);
-		});
+	const [
+		bindings,
+		routes,
+		customDomains,
+		workersDev,
+		serviceEnvMetadata,
+		cronTriggers,
+	] = await Promise.all([
+		fetchResult<WorkerMetadata["bindings"]>(
+			`/accounts/${accountId}/workers/services/${workerName}/environments/${serviceEnvironment}/bindings`
+		),
+		fetchResult<RoutesRes>(
+			`/accounts/${accountId}/workers/services/${workerName}/environments/${serviceEnvironment}/routes?show_zonename=true`
+		),
+		fetchResult<CustomDomainsRes>(
+			`/accounts/${accountId}/workers/domains/records?page=0&per_page=5&service=${workerName}&environment=${serviceEnvironment}`
+		),
 
-	const mappedBindings = mapBindings(bindings);
+		fetchResult<WorkersDevRes>(
+			`/accounts/${accountId}/workers/services/${workerName}/environments/${serviceEnvironment}/subdomain`
+		),
+
+		fetchResult<ServiceMetadataRes["default_environment"]>(
+			`/accounts/${accountId}/workers/services/${workerName}/environments/${serviceEnvironment}`
+		),
+		fetchResult<CronTriggersRes>(
+			`/accounts/${accountId}/workers/scripts/${workerName}/schedules`
+		),
+	]).catch((e) => {
+		throw new Error(
+			`Error Occurred ${e}: Unable to fetch bindings, routes, or services metadata from the dashboard. Please try again later.`
+		);
+	});
+
+	const mappedBindings = await mapBindings(accountId, bindings);
 
 	const durableObjectClassNames = bindings
 		.filter((binding) => binding.type === "durable_object_namespace")
@@ -942,29 +930,35 @@ async function getWorkerConfig(
 			(durableObject) => (durableObject as { class_name: string }).class_name
 		);
 
-	const routeOrRoutes = routes.map((rawRoute) => {
-		const { id: _id, ...route } = rawRoute;
-		if (Object.keys(route).length === 1) {
-			return route.pattern;
-		} else {
-			return route as Route;
-		}
-	});
-	const routeOrRoutesToConfig =
-		routeOrRoutes.length > 1
-			? { routes: routeOrRoutes }
-			: { route: routeOrRoutes[0] };
+	const allRoutes: Route[] = [
+		...routes.map(
+			(r) => ({ pattern: r.pattern, zone_name: r.zone_name }) as ZoneNameRoute
+		),
+		...customDomains.map(
+			(c) =>
+				({
+					pattern: c.hostname,
+					zone_name: c.zone_name,
+					custom_domain: true,
+				}) as CustomDomainRoute
+		),
+	];
 
 	return {
+		name: workerName,
+		main: entrypoint,
+		workers_dev: workersDev.enabled,
+		preview_urls: workersDev.previews_enabled,
 		compatibility_date:
 			serviceEnvMetadata.script.compatibility_date ??
 			new Date().toISOString().substring(0, 10),
-		...routeOrRoutesToConfig,
-		usage_model: serviceEnvMetadata.script.usage_model,
+		compatibility_flags: serviceEnvMetadata.script.compatibility_flags,
+		...(allRoutes.length ? { routes: allRoutes } : {}),
 		placement:
 			serviceEnvMetadata.script.placement_mode === "smart"
 				? { mode: "smart" }
 				: undefined,
+		limits: serviceEnvMetadata.script.limits,
 		...(durableObjectClassNames.length
 			? {
 					migrations: [
@@ -973,24 +967,37 @@ async function getWorkerConfig(
 							new_classes: durableObjectClassNames,
 						},
 					],
-			  }
+				}
 			: {}),
-		triggers: {
-			crons: cronTriggers.schedules.map((scheduled) => scheduled.cron),
-		},
-		env: environments
-			?.filter((env) => env.environment !== "production")
-			// `env` can have multiple Environments, with different configs.
-			.reduce((envObj, { environment }) => {
-				return { ...envObj, [environment]: {} };
-				// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			}, {} as RawConfig["env"]),
+		...(cronTriggers.schedules.length
+			? {
+					triggers: {
+						crons: cronTriggers.schedules.map((scheduled) => scheduled.cron),
+					},
+				}
+			: {}),
 		tail_consumers: serviceEnvMetadata.script.tail_consumers,
+		observability: serviceEnvMetadata.script.observability,
 		...mappedBindings,
 	};
 }
 
-export function mapBindings(bindings: WorkerMetadataBinding[]): RawConfig {
+export async function mapBindings(
+	accountId: string,
+	bindings: WorkerMetadataBinding[]
+): Promise<RawConfig> {
+	//the binding API doesn't provide us with enough information to make a friendly user experience.
+	//lets call D1's API to get more information
+	const d1BindingsWithInfo: Record<string, DatabaseInfo> = {};
+	await Promise.all(
+		bindings
+			.filter((binding) => binding.type === "d1")
+			.map(async (binding) => {
+				const dbInfo = await getDatabaseInfoFromId(accountId, binding.id);
+				d1BindingsWithInfo[binding.id] = dbInfo;
+			})
+	);
+
 	return (
 		bindings
 			.filter((binding) => (binding.type as string) !== "secret_text")
@@ -1040,6 +1047,18 @@ export function mapBindings(bindings: WorkerMetadataBinding[]): RawConfig {
 							};
 						}
 						break;
+					case "d1":
+						{
+							configObj.d1_databases = [
+								...(configObj.d1_databases ?? []),
+								{
+									binding: binding.name,
+									database_id: binding.id,
+									database_name: d1BindingsWithInfo[binding.id].name,
+								},
+							];
+						}
+						break;
 					case "browser":
 						{
 							configObj.browser = {
@@ -1074,6 +1093,7 @@ export function mapBindings(bindings: WorkerMetadataBinding[]): RawConfig {
 									binding: binding.name,
 									service: binding.service,
 									environment: binding.environment,
+									entrypoint: binding.entrypoint,
 								},
 							];
 						}
@@ -1139,14 +1159,105 @@ export function mapBindings(bindings: WorkerMetadataBinding[]): RawConfig {
 							};
 						}
 						break;
-					default: {
-						// If we don't know what the type is, its an unsafe binding
-						// eslint-disable-next-line @typescript-eslint/no-explicit-any
-						if (!(binding as any)?.type) break;
+					case "secret_text":
+						// Ignore secrets
+						break;
+					case "version_metadata": {
+						{
+							configObj.version_metadata = {
+								binding: binding.name,
+							};
+						}
+						break;
+					}
+					case "send_email": {
+						configObj.send_email = [
+							...(configObj.send_email ?? []),
+							{
+								name: binding.name,
+								destination_address: binding.destination_address,
+								allowed_destination_addresses:
+									binding.allowed_destination_addresses,
+							},
+						];
+						break;
+					}
+					case "queue":
+						configObj.queues ??= { producers: [] };
+						configObj.queues.producers = [
+							...(configObj.queues.producers ?? []),
+							{
+								binding: binding.name,
+								queue: binding.queue_name,
+								delivery_delay: binding.delivery_delay,
+							},
+						];
+						break;
+					case "vectorize":
+						configObj.vectorize = [
+							...(configObj.vectorize ?? []),
+							{
+								binding: binding.name,
+								index_name: binding.index_name,
+							},
+						];
+						break;
+					case "hyperdrive":
+						configObj.hyperdrive = [
+							...(configObj.hyperdrive ?? []),
+							{
+								binding: binding.name,
+								id: binding.id,
+							},
+						];
+						break;
+					case "mtls_certificate":
+						configObj.mtls_certificates = [
+							...(configObj.mtls_certificates ?? []),
+							{
+								binding: binding.name,
+								certificate_id: binding.certificate_id,
+							},
+						];
+						break;
+					case "pipelines":
+						configObj.pipelines = [
+							...(configObj.pipelines ?? []),
+							{
+								binding: binding.name,
+								pipeline: binding.pipeline,
+							},
+						];
+						break;
+					case "assets":
+						throw new FatalError(
+							"`wrangler init --from-dash` is not yet supported for Workers with Assets"
+						);
+					case "inherit":
 						configObj.unsafe = {
 							bindings: [...(configObj.unsafe?.bindings ?? []), binding],
 							metadata: configObj.unsafe?.metadata ?? undefined,
 						};
+						break;
+					case "workflow":
+						{
+							configObj.workflows = [
+								...(configObj.workflows ?? []),
+								{
+									binding: binding.name,
+									name: binding.workflow_name,
+									class_name: binding.class_name,
+									script_name: binding.script_name,
+								},
+							];
+						}
+						break;
+					default: {
+						configObj.unsafe = {
+							bindings: [...(configObj.unsafe?.bindings ?? []), binding],
+							metadata: configObj.unsafe?.metadata ?? undefined,
+						};
+						assertNever(binding);
 					}
 				}
 
@@ -1154,12 +1265,6 @@ export function mapBindings(bindings: WorkerMetadataBinding[]): RawConfig {
 				// eslint-disable-next-line @typescript-eslint/no-explicit-any
 			}, {} as RawConfig)
 	);
-}
-
-function* createBatches<T>(array: T[], size: number): IterableIterator<T[]> {
-	for (let i = 0; i < array.length; i += size) {
-		yield array.slice(i, i + size);
-	}
 }
 
 /** Assert that there is no type argument passed. */
@@ -1192,4 +1297,29 @@ function assertNoSiteArg(args: InitArgs, creationDirectory: string) {
 			"Have you considered using Cloudflare Pages instead? See https://pages.cloudflare.com/.";
 		throw new CommandLineArgsError(message);
 	}
+}
+
+export async function downloadWorker(accountId: string, workerName: string) {
+	const serviceMetadata = await fetchResult<ServiceMetadataRes>(
+		`/accounts/${accountId}/workers/services/${workerName}`
+	);
+
+	const defaultEnvironment = serviceMetadata?.default_environment.environment;
+
+	// Use the default environment, assuming it's the most up to date code.
+	const { entrypoint, modules } = await fetchWorker(
+		`/accounts/${accountId}/workers/services/${workerName}/environments/${defaultEnvironment}/content/v2`
+	);
+
+	const config = await getWorkerConfig(
+		accountId,
+		workerName,
+		entrypoint,
+		defaultEnvironment
+	);
+
+	return {
+		modules,
+		config,
+	};
 }

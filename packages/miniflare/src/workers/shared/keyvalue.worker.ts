@@ -8,7 +8,7 @@ import {
 import { base64Decode, base64Encode } from "./data";
 import { MiniflareDurableObject } from "./object.worker";
 import { InclusiveRange } from "./range";
-import { TypedSql, drain, get } from "./sql.worker";
+import { drain, get, TypedSql } from "./sql.worker";
 import { Timers } from "./timers.worker";
 import { Awaitable } from "./types";
 
@@ -52,7 +52,7 @@ CREATE INDEX IF NOT EXISTS _mf_entries_expiration_idx ON _mf_entries(expiration)
 `;
 function sqlStmts(db: TypedSql) {
 	const stmtGetBlobIdByKey = db.stmt<Pick<Row, "key">, Pick<Row, "blob_id">>(
-		"SELECT blob_id FROM _mf_entries WHERE :key"
+		"SELECT blob_id FROM _mf_entries WHERE key = :key"
 	);
 	const stmtPut = db.stmt<Row>(
 		`INSERT OR REPLACE INTO _mf_entries (key, blob_id, expiration, metadata)

@@ -1,5 +1,6 @@
 import JSZip from "jszip";
 import type { generateGitHubFetch } from "./gitHubFetch";
+
 interface Artifact {
 	name: string;
 	archive_download_url: string;
@@ -25,7 +26,9 @@ export const getArtifactForWorkflowRun = async ({
 	const cache = caches.default;
 
 	const cachedResponse = await cache.match(cacheKey);
-	if (cachedResponse) return cachedResponse;
+	if (cachedResponse && cachedResponse.status === 200) {
+		return cachedResponse;
+	}
 
 	try {
 		const artifactsResponse = await gitHubFetch(
@@ -37,11 +40,19 @@ export const getArtifactForWorkflowRun = async ({
 			}
 		);
 		if (!artifactsResponse.ok) {
+			const responseData = {
+				"artifactsResponse.ok": artifactsResponse.ok,
+				"artifactsResponse.status": artifactsResponse.status,
+				"artifactsResponse.text": await artifactsResponse.text(),
+				repo,
+				runID,
+			};
+
 			if (artifactsResponse.status >= 500) {
-				return new Response(null, { status: 502 });
+				return Response.json(responseData, { status: 502 });
 			}
 
-			return new Response(null, { status: 404 });
+			return Response.json(responseData, { status: 404 });
 		}
 
 		const { artifacts } = (await artifactsResponse.json()) as {
@@ -51,15 +62,67 @@ export const getArtifactForWorkflowRun = async ({
 		const artifact = artifacts.find(
 			(artifactCandidate) => artifactCandidate.name === name
 		);
-		if (artifact === undefined) return new Response(null, { status: 404 });
+		if (artifact === undefined) {
+			return Response.json(
+				{ artifact, name, "artifacts.length": artifacts.length },
+				{ status: 404 }
+			);
+		}
 
-		const zipResponse = await gitHubFetch(artifact.archive_download_url);
-		if (!zipResponse.ok) {
-			if (zipResponse.status >= 500) {
-				return new Response(null, { status: 502 });
+		const redirResponse = await gitHubFetch(artifact.archive_download_url, {
+			// Azure will block the request if we auto redirect because
+			// it doesn't like the auth header. To work around this, we
+			// can fetch the new location in a separate fetch call.
+			redirect: "manual",
+		});
+		if (redirResponse.status !== 302) {
+			const responseData = {
+				"redirResponse.status": redirResponse.status,
+				"redirResponse.text": await redirResponse.text(),
+				repo,
+				runID,
+				"artifact.archive_download_url": artifact.archive_download_url,
+			};
+
+			if (redirResponse.status >= 500) {
+				return Response.json(responseData, { status: 502 });
 			}
 
-			return new Response(null, { status: 404 });
+			return Response.json(responseData, { status: 404 });
+		}
+
+		const location = redirResponse.headers.get("location");
+		if (!location) {
+			const responseData = {
+				"redirResponse.status": redirResponse.status,
+				"redirResponse.text": await redirResponse.text(),
+				repo,
+				runID,
+				"artifact.archive_download_url": artifact.archive_download_url,
+			};
+			return Response.json(responseData, { status: 502 });
+		}
+
+		const zipResponse = await fetch(location, {
+			headers: {
+				"User-Agent": "@cloudflare/workers-sdk/packages/prerelease-registry",
+			},
+		});
+		if (!zipResponse.ok) {
+			const responseData = {
+				"zipResponse.ok": zipResponse.ok,
+				"zipResponse.status": zipResponse.status,
+				"zipResponse.text": await zipResponse.text(),
+				repo,
+				runID,
+				"artifact.archive_download_url": artifact.archive_download_url,
+			};
+
+			if (zipResponse.status >= 500) {
+				return Response.json(responseData, { status: 502 });
+			}
+
+			return Response.json(responseData, { status: 404 });
 		}
 
 		const zip = new JSZip();
@@ -67,11 +130,15 @@ export const getArtifactForWorkflowRun = async ({
 
 		const files = zip.files;
 		const fileNames = Object.keys(files);
-		const tgzFileName = fileNames.find((fileName) => fileName.endsWith(".tgz"));
-		if (tgzFileName === undefined) return new Response(null, { status: 404 });
+		const downloadableFileName = fileNames.find(
+			(fileName) => fileName.endsWith(".tgz") || fileName.endsWith(".vsix")
+		);
+		if (downloadableFileName === undefined) {
+			return Response.json({ fileNames }, { status: 404 });
+		}
 
-		const tgzBlob = await files[tgzFileName].async("blob");
-		const response = new Response(tgzBlob, {
+		const downloadableBlob = await files[downloadableFileName].async("blob");
+		const response = new Response(downloadableBlob, {
 			headers: { "Cache-Control": `public, s-maxage=${ONE_WEEK}` },
 		});
 
@@ -79,6 +146,6 @@ export const getArtifactForWorkflowRun = async ({
 
 		return response;
 	} catch (thrown) {
-		return new Response(null, { status: 500 });
+		return new Response(String(thrown), { status: 500 });
 	}
 };

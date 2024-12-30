@@ -44,6 +44,8 @@ export interface D1Metrics {
 	sum?: {
 		readQueries?: number;
 		writeQueries?: number;
+		rowsRead?: number;
+		rowsWritten?: number;
 		queryBatchResponseBytes?: number;
 	};
 	quantiles?: {
@@ -70,3 +72,88 @@ export interface D1MetricsGraphQLResponse {
 		};
 	};
 }
+
+export interface D1Queries {
+	avg?: {
+		queryDurationMs?: number;
+		rowsRead?: number;
+		rowsWritten?: number;
+		rowsReturned?: number;
+	};
+	sum?: {
+		queryDurationMs?: number;
+		rowsRead?: number;
+		rowsWritten?: number;
+		rowsReturned?: number;
+	};
+	count?: number;
+	dimensions: {
+		query?: string;
+		databaseId?: string;
+		date?: string;
+		datetime?: string;
+		datetimeMinute?: string;
+		datetimeFiveMinutes?: string;
+		datetimeFifteenMinutes?: string;
+		datetimeHour?: string;
+	};
+}
+
+export interface D1QueriesGraphQLResponse {
+	data: {
+		viewer: {
+			accounts: { d1QueriesAdaptiveGroups?: D1Queries[] }[];
+		};
+	};
+}
+
+export type ImportInitResponse = {
+	filename: string;
+	upload_url: string;
+};
+export type ImportPollingResponse = {
+	success: true;
+	type: "import";
+	at_bookmark: string;
+	messages: string[];
+	errors: string[];
+} & (
+	| {
+			status: "active" | "error";
+	  }
+	| {
+			status: "complete";
+			result: {
+				final_bookmark: string;
+				num_queries: number;
+				meta: {
+					served_by: string;
+					duration: number;
+					changes: number;
+					last_row_id: number;
+					changed_db: boolean;
+					size_after: number;
+					rows_read: number;
+					rows_written: number;
+				};
+			};
+	  }
+);
+
+export type ExportPollingResponse = {
+	success: true;
+	type: "export";
+	at_bookmark: string;
+	messages: string[];
+	error: string;
+} & (
+	| {
+			status: "active" | "error";
+	  }
+	| {
+			status: "complete";
+			result: { filename: string; signed_url: string };
+	  }
+);
+
+export type PollingFailure = { success: false; error: string };

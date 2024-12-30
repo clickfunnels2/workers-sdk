@@ -1,9 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
+import { execa } from "execa";
+import { getC3CommandFromEnv } from "../environment-variables/misc-variables";
+import { CommandLineArgsError, UserError } from "../errors";
 import { cloneIntoDirectory, initializeGit } from "../git-client";
-import { CommandLineArgsError, printWranglerBanner } from "../index";
+import { printWranglerBanner } from "../index";
 import { initHandler } from "../init";
 import { logger } from "../logger";
+import { getPackageManager } from "../package-manager";
+import * as shellquote from "../utils/shell-quote";
 import type {
 	CommonYargsArgv,
 	StrictYargsOptionsToInterface,
@@ -35,7 +40,6 @@ export function generateOptions(yargs: CommonYargsArgv) {
 }
 type GenerateArgs = StrictYargsOptionsToInterface<typeof generateOptions>;
 
-// Originally, generate was a rust function: https://github.com/cloudflare/wrangler-legacy/blob/master/src/cli/mod.rs#L106-L123
 export async function generateHandler(args: GenerateArgs) {
 	// somehow, `init` marks name as required but then also runs fine
 	// with the name omitted, and then substitutes it at runtime with ""
@@ -53,7 +57,8 @@ export async function generateHandler(args: GenerateArgs) {
 			type: undefined,
 			_: args._,
 			$0: args.$0,
-			experimentalJsonConfig: false,
+			experimentalVersions: args.experimentalVersions,
+			experimentalProvision: args.experimentalProvision,
 		});
 	}
 
@@ -61,8 +66,9 @@ export async function generateHandler(args: GenerateArgs) {
 	await printWranglerBanner();
 
 	logger.warn(
-		`The \`generate\` command is no longer supported and will be removed in a future version.`
-		// TODO: recommend replacement commands
+		`Deprecation: \`wrangler generate\` has been deprecated and will be removed in a future version.\n` +
+			`Use \`npm create cloudflare@latest\` for new Workers and Pages projects.\n\n` +
+			`Please refer to https://developers.cloudflare.com/workers/wrangler/deprecations/#generate for more information."`
 	);
 
 	if (args.type) {
@@ -98,6 +104,27 @@ export async function generateHandler(args: GenerateArgs) {
 		throw new CommandLineArgsError(message);
 	}
 
+	if (isTemplateFolder(args.template)) {
+		logger.warn(
+			`Deprecation: \`wrangler generate\` is deprecated.\n` +
+				`Running \`npm create cloudflare@latest\` for you instead.\n`
+		);
+
+		const packageManager = await getPackageManager(process.cwd());
+
+		const c3Arguments = [
+			...shellquote.parse(getC3CommandFromEnv()),
+			...(packageManager.type === "npm" ? ["--"] : []),
+			args.name,
+			"--accept-defaults",
+			"--no-deploy",
+			"--no-open",
+		];
+
+		await execa(packageManager.type, c3Arguments, { stdio: "inherit" });
+		return;
+	}
+
 	logger.log(
 		`Creating a worker in ${path.basename(creationDirectory)} from ${
 			args.template
@@ -122,11 +149,11 @@ export async function generateHandler(args: GenerateArgs) {
  * - workers
  * |
  * | - worker
- * | | - wrangler.toml
+ * | | - wrangler.toml/wrangler.json
  * | | ...
  * |
  * | - worker-1
- * | | - wrangler.toml
+ * | | - wrangler.toml/wrangler.json
  * | | ...
  * ```
  *
@@ -252,7 +279,7 @@ function toUrlBase({ httpsUrl, gitUrl, shorthandUrl }: TemplateRegexUrlGroup) {
 			case "bb":
 				return "https://bitbucket.org";
 			default:
-				throw new Error(
+				throw new UserError(
 					`Unable to parse shorthand ${shorthandUrl}. Supported options are "bitbucket" ("bb"), "github" ("gh"), and "gitlab" ("gl")`
 				);
 		}
@@ -272,20 +299,12 @@ function parseTemplatePath(templatePath: string): {
 	remote: string;
 	subdirectory?: string;
 } {
-	if (!templatePath.includes("/")) {
-		// template is a cloudflare canonical template, it doesn't include a slash in the name
-		return {
-			remote: "https://github.com/cloudflare/workers-sdk.git",
-			subdirectory: `templates/${templatePath}`,
-		};
-	}
-
 	const groups = TEMPLATE_REGEX.exec(templatePath)?.groups as unknown as
 		| TemplateRegexGroups
 		| undefined;
 
 	if (!groups) {
-		throw new Error(`Unable to parse ${templatePath} as a template`);
+		throw new UserError(`Unable to parse ${templatePath} as a template`);
 	}
 
 	const { user, repository, subdirectoryPath, tag, ...urlGroups } = groups;
@@ -301,4 +320,8 @@ function parseTemplatePath(templatePath: string): {
 	const subdirectory = subdirectoryPath?.slice(1);
 
 	return { remote, subdirectory };
+}
+
+function isTemplateFolder(templatePath: string): boolean {
+	return !templatePath.includes("/");
 }

@@ -25,7 +25,7 @@
 # to see and restrict what each Worker can access. Instead, the default is that a Worker has
 # access to no privileged resources at all, and you must explicitly declare "bindings" to give
 # it access to specific resources. A binding gives the Worker a JavaScript API object that points
-# to a specific resource. This means that by changing config alone, you can fully controll which
+# to a specific resource. This means that by changing config alone, you can fully control which
 # resources an Worker connects to. (You can even disallow access to the public internet, although
 # public internet access is granted by default.)
 #
@@ -34,7 +34,12 @@
 # afraid to fall back to code for anything the config cannot express, as Workers are very fast
 # to execute!
 
-$import "/capnp/c++.capnp".namespace("workerd::server::config");
+# Any capnp files imported here must be:
+# 1. embedded into workerd-meta.capnp
+# 2. added to `tryImportBulitin` in workerd.c++ (grep for '"/workerd/workerd.capnp"').
+using Cxx = import "/capnp/c++.capnp";
+$Cxx.namespace("workerd::server::config");
+$Cxx.allowCancellation;
 
 struct Config {
   # Top-level configuration for a workerd instance.
@@ -74,6 +79,11 @@ struct Config {
   extensions @3 :List(Extension);
   # Extensions provide capabilities to all workers. Extensions are usually prepared separately
   # and are late-linked with the app using this config field.
+
+  autogates @4 :List(Text);
+  # A list of gates which are enabled.
+  # These are used to gate features/changes in workerd and in our internal repo. See the equivalent
+  # config definition in our internal repo for more details.
 }
 
 # ========================================================================================
@@ -197,7 +207,7 @@ struct Worker {
     # event handlers.
     #
     # The value of this field is the raw source code. When using Cap'n Proto text format, use the
-    # `embed` directive to read the code from an exnternal file:
+    # `embed` directive to read the code from an external file:
     #
     #     serviceWorkerScript = embed "worker.js"
 
@@ -252,7 +262,20 @@ struct Worker {
       # (a) allows for importing Node.js-compat built-ins without the node: specifier-prefix
       # (b) exposes the subset of common Node.js globals such as process, Buffer, etc that
       #     we implement in the workerd runtime.
+
+      pythonModule @8 :Text;
+      # A Python module. All bundles containing this value type are converted into a JS/WASM Worker
+      # Bundle prior to execution.
+
+      pythonRequirement @9 :Text;
+      # A Python package that is required by this bundle. The package must be supported by
+      # Pyodide (https://pyodide.org/en/stable/usage/packages-in-pyodide.html). All packages listed
+      # will be installed prior to the execution of the worker.
     }
+
+    namedExports @10 :List(Text);
+    # For commonJsModule and nodeJsCompatModule, this is a list of named exports that the
+    # module expects to be exported once the evaluation is complete.
   }
 
   compatibilityDate @3 :Text;
@@ -327,7 +350,7 @@ struct Worker {
 
       kvNamespace @11 :ServiceDesignator;
       # A KV namespace, implemented by the named service. The Worker sees a KvNamespace-typed
-      # binding. Requests to the namespace will be converted into HTTP requests targetting the
+      # binding. Requests to the namespace will be converted into HTTP requests targeting the
       # given service name.
 
       r2Bucket @12 :ServiceDesignator;
@@ -340,7 +363,7 @@ struct Worker {
 
       queue @15 :ServiceDesignator;
       # A Queue binding, implemented by the named service. Requests to the
-      # namespace will be converted into HTTP requests targetting the given
+      # namespace will be converted into HTTP requests targeting the given
       # service name.
 
       fromEnvironment @16 :Text;
@@ -366,6 +389,17 @@ struct Worker {
 
       unsafeEval @23 :Void;
       # A simple binding that enables access to the UnsafeEval API.
+
+      memoryCache :group {
+        # A binding representing access to an in-memory cache.
+
+        id @24 :Text;
+        # The identifier associated with this cache. Any number of isolates
+        # can access the same in-memory cache (within the same process), and
+        # each worker may use any number of in-memory caches.
+
+        limits @25 :MemoryCacheLimits;
+      }
 
       # TODO(someday): dispatch, other new features
     }
@@ -464,6 +498,12 @@ struct Worker {
       }
     }
 
+    struct MemoryCacheLimits {
+      maxKeys @0 :UInt32;
+      maxValueSize @1 :UInt32;
+      maxTotalValueSize @2 :UInt64;
+    }
+
     struct WrappedBinding {
       # A binding that wraps a group of (lower-level) bindings in a common API.
 
@@ -485,7 +525,7 @@ struct Worker {
     }
   }
 
-  globalOutbound @6 :ServiceDesignator = (name = "internet");
+  globalOutbound @6 :ServiceDesignator = "internet";
   # Where should the global "fetch" go to? The default is the service called "internet", which
   # should usually be configured to talk to the public internet.
 
@@ -520,10 +560,10 @@ struct Worker {
       # Instances of this class are ephemeral -- they have no durable storage at all. The
       # `state.storage` API will not be present. Additionally, this namespace will allow arbitrary
       # strings as IDs. There are no `idFromName()` nor `newUniqueId()` methods; `get()` takes any
-      # string as a paremeter.
+      # string as a parameter.
       #
       # Ephemeral objects are NOT globally unique, only "locally" unique, for some definition of
-      # "local". For exmaple, on Cloudflare's network, these objects are unique per-colo.
+      # "local". For example, on Cloudflare's network, these objects are unique per-colo.
       #
       # WARNING: Cloudflare Workers currently limits this feature to Cloudflare-internal users
       #   only, because using them correctly requires deep understanding of Cloudflare network
@@ -539,6 +579,14 @@ struct Worker {
     # pinned to memory forever, so we provide this flag to change the default behavior.
     #
     # Note that this is only supported in Workerd; production Durable Objects cannot toggle eviction.
+
+    enableSql @4 :Bool;
+    # Whether or not Durable Objects in this namespace can use the `storage.sql` API to execute SQL
+    # queries.
+    #
+    # workerd uses SQLite to back all Durable Objects, but the SQL API is hidden by default to
+    # emulate behavior of traditional DO namespaces on Cloudflare that aren't SQLite-backed. This
+    # flag should be enabled when testing code that will run on a SQLite-backed namespace.
   }
 
   durableObjectUniqueKeyModifier @8 :Text;
@@ -579,6 +627,9 @@ struct Worker {
 
   # TODO(someday): Support distributing objects across a cluster. At present, objects are always
   #   local to one instance of the runtime.
+
+  moduleFallback @13 :Text;
+
 }
 
 struct ExternalServer {
@@ -692,7 +743,7 @@ struct DiskDirectory {
   # particular, no attempt is made to guess the `Content-Type` header. You normally would wrap
   # this in a Worker that fills in the metadata in the way you want.
   #
-  # A GET request targetting a directory (rather than a file) will return a basic JSAN directory
+  # A GET request targeting a directory (rather than a file) will return a basic JSAN directory
   # listing like:
   #
   #     [{"name":"foo","type":"file"},{"name":"bar","type":"directory"}]
@@ -781,6 +832,12 @@ struct HttpOptions {
     value @1 :Text;
     # If null, the header will be removed.
   }
+
+  capnpConnectHost @5 :Text;
+  # A CONNECT request for this host+port will be treated as a request to form a Cap'n Proto RPC
+  # connection. The server will expose a WorkerdBootstrap as the bootstrap interface, allowing
+  # events to be delivered to the target worker via capnp. Clients will use capnp for non-HTTP
+  # event types (especially JSRPC).
 
   # TODO(someday): When we support TCP, include an option to deliver CONNECT requests to the
   #   TCP handler.

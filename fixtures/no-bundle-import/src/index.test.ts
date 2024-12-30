@@ -1,13 +1,20 @@
 import path from "path";
-import { describe, expect, test, beforeAll, afterAll } from "vitest";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { unstable_dev } from "wrangler";
-import type { UnstableDevWorker } from "wrangler";
+import type { Unstable_DevWorker } from "wrangler";
 
 describe("Worker", () => {
-	let worker: UnstableDevWorker;
+	let worker: Unstable_DevWorker;
 
 	beforeAll(async () => {
-		worker = await unstable_dev(path.resolve(__dirname, "index.js"));
+		worker = await unstable_dev(path.resolve(__dirname, "index.js"), {
+			logLevel: "none",
+			ip: "127.0.0.1",
+			experimental: {
+				disableExperimentalWarning: true,
+				devEnv: true,
+			},
+		});
 	}, 30_000);
 
 	afterAll(() => worker.stop());

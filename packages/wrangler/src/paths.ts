@@ -56,7 +56,7 @@ export function readableRelative(to: string) {
 
 /**
  * The __RELATIVE_PACKAGE_PATH__ is defined either in the esbuild config (for production)
- * or the jest.setup.ts (for unit testing).
+ * or the vitest.setup.ts (for unit testing).
  */
 declare const __RELATIVE_PACKAGE_PATH__: string;
 
@@ -99,7 +99,13 @@ export function getWranglerTmpDir(
 	const tmpPrefix = path.join(tmpRoot, `${prefix}-`);
 	const tmpDir = fs.realpathSync(fs.mkdtempSync(tmpPrefix));
 
-	const removeDir = () => fs.rmSync(tmpDir, { recursive: true, force: true });
+	const removeDir = () => {
+		try {
+			return fs.rmSync(tmpDir, { recursive: true, force: true });
+		} catch (e) {
+			// This sometimes fails on Windows with EBUSY
+		}
+	};
 	const removeExitListener = onExit(removeDir);
 
 	return {

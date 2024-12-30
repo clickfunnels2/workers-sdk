@@ -1,12 +1,12 @@
-import { useContext, useEffect, useState } from "react";
-import { A, Div, Form, Span, Strong } from "@cloudflare/elements";
-import { createComponent } from "@cloudflare/style-container";
 import { Button } from "@cloudflare/component-button";
 import { Icon } from "@cloudflare/component-icon";
-import { BAR_HEIGHT } from "./constants";
-import { WorkersLogo } from "./WorkersLogo";
 import { Input } from "@cloudflare/component-input";
+import { A, Div, Form, Span, Strong } from "@cloudflare/elements";
+import { createComponent } from "@cloudflare/style-container";
+import { BAR_HEIGHT } from "@cloudflare/workers-editor-shared";
+import { useContext, useEffect, useState } from "react";
 import { ServiceContext } from "./QuickEditor";
+import { WorkersLogo } from "./WorkersLogo";
 
 const Wrapper = createComponent(({ theme }) => ({
 	display: "flex",
@@ -119,7 +119,7 @@ export function TopBar() {
 				<Button
 					type="primary"
 					inverted={true}
-					disabled={!Boolean(previewHash?.serialised)}
+					disabled={!previewHash?.serialised}
 					onClick={() => {
 						void navigator.clipboard.writeText(location.href);
 						setHasCopied(!hasCopied);
@@ -137,7 +137,7 @@ export function TopBar() {
 			>
 				<Button
 					type="primary"
-					disabled={!Boolean(previewHash?.serialised)}
+					disabled={!previewHash?.serialised}
 					tabIndex={-1}
 				>
 					Deploy

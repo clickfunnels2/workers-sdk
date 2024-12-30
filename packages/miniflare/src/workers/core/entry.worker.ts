@@ -1,17 +1,18 @@
 import {
-	Colorize,
 	blue,
 	bold,
+	Colorize,
 	green,
 	grey,
 	red,
 	reset,
 	yellow,
 } from "kleur/colors";
-import { LogLevel, SharedHeaders } from "miniflare:shared";
+import { HttpError, LogLevel, SharedHeaders } from "miniflare:shared";
+import { isCompressedByCloudflareFL } from "../../shared/mime-types";
 import { CoreBindings, CoreHeaders } from "./constants";
 import { STATUS_CODES } from "./http";
-import { WorkerRoute, matchRoutes } from "./routing";
+import { matchRoutes, WorkerRoute } from "./routing";
 
 type Env = {
 	[CoreBindings.SERVICE_LOOPBACK]: Fetcher;
@@ -21,27 +22,62 @@ type Env = {
 	[CoreBindings.JSON_CF_BLOB]: IncomingRequestCfProperties;
 	[CoreBindings.JSON_ROUTES]: WorkerRoute[];
 	[CoreBindings.JSON_LOG_LEVEL]: LogLevel;
-	[CoreBindings.DATA_LIVE_RELOAD_SCRIPT]: ArrayBuffer;
+	[CoreBindings.DATA_LIVE_RELOAD_SCRIPT]?: ArrayBuffer;
 	[CoreBindings.DURABLE_OBJECT_NAMESPACE_PROXY]: DurableObjectNamespace;
+	[CoreBindings.DATA_PROXY_SHARED_SECRET]?: ArrayBuffer;
 } & {
 	[K in `${typeof CoreBindings.SERVICE_USER_ROUTE_PREFIX}${string}`]:
 		| Fetcher
 		| undefined; // Won't have a `Fetcher` for every possible `string`
 };
 
+const encoder = new TextEncoder();
+
 function getUserRequest(
 	request: Request<unknown, IncomingRequestCfProperties>,
 	env: Env
 ) {
+	// The ORIGINAL_URL header is added to outbound requests from Miniflare,
+	// triggered either by calling Miniflare.#dispatchFetch(request),
+	// or as part of a loopback request in a Custom Service.
+	// The ORIGINAL_URL is extracted from the `request` being sent.
+	// This is relevant here in the case that a Miniflare implemented Proxy Worker is
+	// sitting in front of this User Worker, which is hosted on a different URL.
 	const originalUrl = request.headers.get(CoreHeaders.ORIGINAL_URL);
-	const upstreamUrl = env[CoreBindings.TEXT_UPSTREAM_URL];
 	let url = new URL(originalUrl ?? request.url);
+
+	let rewriteHeadersFromOriginalUrl = false;
+
+	// If the request is signed by a proxy server then we can use the Host and Origin from the ORIGINAL_URL.
+	// The shared secret is required to prevent a malicious user being able to change the headers without permission.
+	const proxySharedSecret = request.headers.get(
+		CoreHeaders.PROXY_SHARED_SECRET
+	);
+	if (proxySharedSecret) {
+		const secretFromHeader = encoder.encode(proxySharedSecret);
+		const configuredSecret = env[CoreBindings.DATA_PROXY_SHARED_SECRET];
+		if (
+			secretFromHeader.byteLength === configuredSecret?.byteLength &&
+			crypto.subtle.timingSafeEqual(secretFromHeader, configuredSecret)
+		) {
+			rewriteHeadersFromOriginalUrl = true;
+		} else {
+			throw new HttpError(
+				400,
+				`Disallowed header in request: ${CoreHeaders.PROXY_SHARED_SECRET}=${proxySharedSecret}`
+			);
+		}
+	}
+
+	// If Miniflare was configured with `upstream`, then we use this to override the url and host in the request.
+	const upstreamUrl = env[CoreBindings.TEXT_UPSTREAM_URL];
 	if (upstreamUrl !== undefined) {
 		// If a custom `upstream` was specified, make sure the URL starts with it
 		let path = url.pathname + url.search;
 		// Remove leading slash, so we resolve relative to `upstream`'s path
 		if (path.startsWith("/")) path = `./${path.substring(1)}`;
 		url = new URL(path, upstreamUrl);
+		rewriteHeadersFromOriginalUrl = true;
 	}
 
 	// Note when constructing new `Request`s from `request`, we must always pass
@@ -54,8 +90,24 @@ function getUserRequest(
 	// See https://github.com/cloudflare/workerd/issues/1122 for more details.
 	request = new Request(url, request);
 	if (request.cf === undefined) {
-		request = new Request(request, { cf: env[CoreBindings.JSON_CF_BLOB] });
+		const cf: IncomingRequestCfProperties = {
+			...env[CoreBindings.JSON_CF_BLOB],
+			// Defaulting to empty string to preserve undefined `Accept-Encoding`
+			// through Wrangler's proxy worker.
+			clientAcceptEncoding: request.headers.get("Accept-Encoding") ?? "",
+		};
+		request = new Request(request, { cf });
 	}
+
+	// `Accept-Encoding` is always set to "br, gzip" in Workers:
+	// https://developers.cloudflare.com/fundamentals/reference/http-request-headers/#accept-encoding
+	request.headers.set("Accept-Encoding", "br, gzip");
+
+	if (rewriteHeadersFromOriginalUrl) {
+		request.headers.set("Host", url.host);
+	}
+
+	request.headers.delete(CoreHeaders.PROXY_SHARED_SECRET);
 	request.headers.delete(CoreHeaders.ORIGINAL_URL);
 	request.headers.delete(CoreHeaders.DISABLE_PRETTY_ERROR);
 	return request;
@@ -82,19 +134,13 @@ function maybePrettifyError(request: Request, response: Response, env: Env) {
 		return response;
 	}
 
-	// Forward `Accept` and `User-Agent` headers if defined
-	const accept = request.headers.get("Accept");
-	const userAgent = request.headers.get("User-Agent");
-	const headers = new Headers();
-	if (accept !== null) headers.set("Accept", accept);
-	if (userAgent !== null) headers.set("User-Agent", userAgent);
-
 	return env[CoreBindings.SERVICE_LOOPBACK].fetch(
 		"http://localhost/core/error",
 		{
 			method: "POST",
-			headers,
+			headers: request.headers,
 			body: response.body,
+			cf: { prettyErrorOriginalUrl: request.url },
 		}
 	);
 }
@@ -138,6 +184,98 @@ function maybeInjectLiveReload(
 		statusText: response.statusText,
 		headers,
 	});
+}
+
+const acceptEncodingElement =
+	/^(?<coding>[a-z]+|\*)(?:\s*;\s*q=(?<weight>\d+(?:.\d+)?))?$/;
+interface AcceptedEncoding {
+	coding: string;
+	weight: number;
+}
+function maybeParseAcceptEncodingElement(
+	element: string
+): AcceptedEncoding | undefined {
+	const match = acceptEncodingElement.exec(element);
+	if (match?.groups == null) return;
+	return {
+		coding: match.groups.coding,
+		weight:
+			match.groups.weight === undefined ? 1 : parseFloat(match.groups.weight),
+	};
+}
+function parseAcceptEncoding(header: string): AcceptedEncoding[] {
+	const encodings: AcceptedEncoding[] = [];
+	for (const element of header.split(",")) {
+		const maybeEncoding = maybeParseAcceptEncodingElement(element.trim());
+		if (maybeEncoding !== undefined) encodings.push(maybeEncoding);
+	}
+	// `Array#sort()` is stable, so original ordering preserved for same weights
+	return encodings.sort((a, b) => b.weight - a.weight);
+}
+function ensureAcceptableEncoding(
+	clientAcceptEncoding: string | null,
+	response: Response
+): Response {
+	// https://www.rfc-editor.org/rfc/rfc9110#section-12.5.3
+
+	// If the client hasn't specified any acceptable encodings, assume anything is
+	if (clientAcceptEncoding === null) return response;
+	const encodings = parseAcceptEncoding(clientAcceptEncoding);
+	if (encodings.length === 0) return response;
+
+	const contentEncoding = response.headers.get("Content-Encoding");
+	const contentType = response.headers.get("Content-Type");
+
+	// if cloudflare's FL does not compress this mime-type, then don't compress locally either
+	if (!isCompressedByCloudflareFL(contentType)) {
+		return response;
+	}
+
+	// If `Content-Encoding` is defined, but unknown, return the response as is
+	if (
+		contentEncoding !== null &&
+		contentEncoding !== "gzip" &&
+		contentEncoding !== "br"
+	) {
+		return response;
+	}
+
+	let desiredEncoding: "gzip" | "br" | undefined;
+	let identityDisallowed = false;
+
+	for (const encoding of encodings) {
+		if (encoding.weight === 0) {
+			// If we have an `identity;q=0` or `*;q=0` entry, disallow no encoding
+			if (encoding.coding === "identity" || encoding.coding === "*") {
+				identityDisallowed = true;
+			}
+		} else if (encoding.coding === "gzip" || encoding.coding === "br") {
+			// If the client accepts one of our supported encodings, use that
+			desiredEncoding = encoding.coding;
+			break;
+		} else if (encoding.coding === "identity") {
+			// If the client accepts no encoding, use that
+			break;
+		}
+	}
+
+	if (desiredEncoding === undefined) {
+		if (identityDisallowed) {
+			return new Response("Unsupported Media Type", {
+				status: 415 /* Unsupported Media Type */,
+				headers: { "Accept-Encoding": "br, gzip" },
+			});
+		}
+		if (contentEncoding === null) return response;
+		response = new Response(response.body, response); // Ensure mutable headers
+		response.headers.delete("Content-Encoding"); // Use identity
+		return response;
+	} else {
+		if (contentEncoding === desiredEncoding) return response;
+		response = new Response(response.body, response); // Ensure mutable headers
+		response.headers.set("Content-Encoding", desiredEncoding); // Use desired
+		return response;
+	}
 }
 
 function colourFromHTTPStatus(status: number): Colorize {
@@ -215,7 +353,16 @@ export default <ExportedHandler<Env>>{
 		const disablePrettyErrorPage =
 			request.headers.get(CoreHeaders.DISABLE_PRETTY_ERROR) !== null;
 
-		request = getUserRequest(request, env);
+		const clientAcceptEncoding = request.headers.get("Accept-Encoding");
+
+		try {
+			request = getUserRequest(request, env);
+		} catch (e) {
+			if (e instanceof HttpError) {
+				return e.toResponse();
+			}
+			throw e;
+		}
 		const url = new URL(request.url);
 		const service = getTargetService(request, url, env);
 		if (service === undefined) {
@@ -232,6 +379,7 @@ export default <ExportedHandler<Env>>{
 				response = await maybePrettifyError(request, response, env);
 			}
 			response = maybeInjectLiveReload(response, env, ctx);
+			response = ensureAcceptableEncoding(clientAcceptEncoding, response);
 			maybeLogRequest(request, response, env, ctx, startTime);
 			return response;
 		} catch (e: any) {

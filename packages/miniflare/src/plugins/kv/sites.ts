@@ -2,17 +2,17 @@ import assert from "assert";
 import fs from "fs/promises";
 import path from "path";
 import SCRIPT_KV_SITES from "worker:kv/sites";
-import { Service, Worker_Binding, Worker_Module } from "../../runtime";
+import { Service, Worker_Binding } from "../../runtime";
 import { globsToRegExps } from "../../shared";
 import {
+	encodeSitesKey,
+	serialiseSiteRegExps,
 	SharedBindings,
 	SiteBindings,
 	SiteMatcherRegExps,
-	encodeSitesKey,
-	serialiseSiteRegExps,
 	testSiteRegExps,
 } from "../../workers";
-import { kProxyNodeBinding } from "../shared";
+import { ProxyNodeBinding } from "../shared";
 import { KV_PLUGIN_NAME } from "./constants";
 
 async function* listKeysInDirectoryInner(
@@ -97,20 +97,9 @@ export async function getSitesNodeBindings(
 		siteRegExps
 	);
 	return {
-		[SiteBindings.KV_NAMESPACE_SITE]: kProxyNodeBinding,
+		[SiteBindings.KV_NAMESPACE_SITE]: new ProxyNodeBinding(),
 		[SiteBindings.JSON_SITE_MANIFEST]: __STATIC_CONTENT_MANIFEST,
 	};
-}
-
-export function maybeGetSitesManifestModule(
-	bindings: Worker_Binding[]
-): Worker_Module | undefined {
-	for (const binding of bindings) {
-		if (binding.name === SiteBindings.JSON_SITE_MANIFEST) {
-			assert("json" in binding && binding.json !== undefined);
-			return { name: SiteBindings.JSON_SITE_MANIFEST, text: binding.json };
-		}
-	}
 }
 
 export function getSitesServices(options: SitesOptions): Service[] {

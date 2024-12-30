@@ -1,8 +1,16 @@
 {
 	"root": true,
 	"extends": "@cloudflare/workers-tsconfig/tsconfig.json",
-	"include": ["**/*.ts"],
-	"exclude": ["node_modules", "dist", "templates", "**/templates/**"],
+	"include": ["**/*.ts", "**/*.mts"],
+	"exclude": [
+		"node_modules",
+		"dist",
+		"scripts/snippets/*",
+		"e2e-tests/fixtures/*",
+		// exclude all template files other than those are directly imported into the program,
+		// e.g. the c3.ts files.
+		"templates*"
+	],
 	"compilerOptions": {
 		"target": "ESNext",
 		"module": "CommonJS",
@@ -15,6 +23,8 @@
 		"resolveJsonModule": true,
 		"paths": {
 			"helpers/*": ["./src/helpers/*"],
+			"templates/*": ["./templates/*"],
+			"templates-experimental/*": ["./templates-experimental/*"],
 			"frameworks/*": ["./src/frameworks/*"],
 			"types": ["./src/types.ts"]
 		}

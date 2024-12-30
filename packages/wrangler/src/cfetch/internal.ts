@@ -1,14 +1,14 @@
 import assert from "node:assert";
-import { fetch, File, Headers } from "undici";
-import { Response } from "undici";
+import { fetch, File, FormData, Headers, Response } from "undici";
 import { version as wranglerVersion } from "../../package.json";
 import { getCloudflareApiBaseUrl } from "../environment-variables/misc-variables";
+import { UserError } from "../errors";
 import { logger } from "../logger";
-import { ParseError, parseJSON } from "../parse";
+import { APIError, parseJSON } from "../parse";
 import { loginOrRefreshIfRequired, requireApiToken } from "../user";
 import type { ApiCredentials } from "../user";
 import type { URLSearchParams } from "node:url";
-import type { RequestInit, HeadersInit } from "undici";
+import type { HeadersInit, RequestInit } from "undici";
 
 /*
  * performApiFetch does everything required to make a CF API request,
@@ -38,11 +38,17 @@ export async function performApiFetch(
 	);
 	const logHeaders = cloneHeaders(headers);
 	delete logHeaders["Authorization"];
-	logger.debug("HEADERS:", JSON.stringify(logHeaders, null, 2));
-	logger.debug(
-		"INIT:",
-		JSON.stringify({ ...init, headers: logHeaders }, null, 2)
-	);
+	logger.debugWithSanitization("HEADERS:", JSON.stringify(logHeaders, null, 2));
+
+	logger.debugWithSanitization("INIT:", JSON.stringify({ ...init }, null, 2));
+	if (init.body instanceof FormData) {
+		logger.debugWithSanitization(
+			"BODY:",
+			await new Response(init.body).text(),
+			null,
+			2
+		);
+	}
 	logger.debug("-- END CF API REQUEST");
 	return await fetch(`${getCloudflareApiBaseUrl()}${resource}${queryString}`, {
 		method,
@@ -82,8 +88,8 @@ export async function fetchInternal<ResponseType>(
 	);
 	const logHeaders = cloneHeaders(response.headers);
 	delete logHeaders["Authorization"];
-	logger.debug("HEADERS:", JSON.stringify(logHeaders, null, 2));
-	logger.debug("RESPONSE:", jsonText);
+	logger.debugWithSanitization("HEADERS:", JSON.stringify(logHeaders, null, 2));
+	logger.debugWithSanitization("RESPONSE:", jsonText);
 	logger.debug("-- END CF API RESPONSE");
 
 	// HTTP 204 and HTTP 205 responses do not return a body. We need to special-case this
@@ -96,7 +102,7 @@ export async function fetchInternal<ResponseType>(
 	try {
 		return parseJSON<ResponseType>(jsonText);
 	} catch (err) {
-		throw new ParseError({
+		throw new APIError({
 			text: "Received a malformed response from the API",
 			notes: [
 				{
@@ -106,6 +112,7 @@ export async function fetchInternal<ResponseType>(
 					text: `${method} ${resource} -> ${response.status} ${response.statusText}`,
 				},
 			],
+			status: response.status,
 		});
 	}
 }
@@ -124,14 +131,14 @@ function cloneHeaders(
 	return headers instanceof Headers
 		? Object.fromEntries(headers.entries())
 		: Array.isArray(headers)
-		? Object.fromEntries(headers)
-		: { ...headers };
+			? Object.fromEntries(headers)
+			: { ...headers };
 }
 
 async function requireLoggedIn(): Promise<void> {
 	const loggedIn = await loginOrRefreshIfRequired();
 	if (!loggedIn) {
-		throw new Error("Not logged in.");
+		throw new UserError("Not logged in.");
 	}
 }
 
@@ -198,7 +205,7 @@ type ResponseWithBody = Response & { body: NonNullable<Response["body"]> };
 export async function fetchR2Objects(
 	resource: string,
 	bodyInit: RequestInit = {}
-): Promise<ResponseWithBody> {
+): Promise<ResponseWithBody | null> {
 	await requireLoggedIn();
 	const auth = requireApiToken();
 	const headers = cloneHeaders(bodyInit.headers);
@@ -212,6 +219,8 @@ export async function fetchR2Objects(
 
 	if (response.ok && response.body) {
 		return response as ResponseWithBody;
+	} else if (response.status === 404) {
+		return null;
 	} else {
 		throw new Error(
 			`Failed to fetch ${resource} - ${response.status}: ${response.statusText});`
@@ -222,10 +231,10 @@ export async function fetchR2Objects(
 /**
  * This is a wrapper STOPGAP for getting the script which returns a raw text response.
  */
-export async function fetchDashboardScript(
+export async function fetchWorker(
 	resource: string,
 	bodyInit: RequestInit = {}
-): Promise<File[]> {
+): Promise<{ entrypoint: string; modules: File[] }> {
 	await requireLoggedIn();
 	const auth = requireApiToken();
 	const headers = cloneHeaders(bodyInit.headers);
@@ -238,7 +247,7 @@ export async function fetchDashboardScript(
 	});
 
 	if (!response.ok || !response.body) {
-		console.error(response.ok, response.body);
+		logger.error(response.ok, response.body);
 		throw new Error(
 			`Failed to fetch ${resource} - ${response.status}: ${response.statusText});`
 		);
@@ -259,12 +268,17 @@ export async function fetchDashboardScript(
 			contents instanceof File ? contents : new File([contents], filename)
 		);
 
-		return files;
+		return {
+			entrypoint: response.headers.get("cf-entrypoint") ?? "src/index.js",
+			modules: files,
+		};
 	} else {
 		const contents = await response.text();
-		const filename = response.headers.get("cf-entrypoint") ?? "index.js";
-		const file = new File([contents], filename, { type: "text" });
+		const file = new File([contents], "index.js", { type: "text" });
 
-		return [file];
+		return {
+			entrypoint: "index.js",
+			modules: [file],
+		};
 	}
 }

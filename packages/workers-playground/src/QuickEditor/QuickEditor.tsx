@@ -1,15 +1,17 @@
-import React, { createContext, useEffect, useState } from "react";
 import { Div } from "@cloudflare/elements";
-import { useDraftWorker } from "./useDraftWorker";
-
+import {
+	isDarkMode,
+	observeDarkMode,
+	theme as styleTheme,
+} from "@cloudflare/style-const";
+import { createComponent } from "@cloudflare/style-container";
+import { BACKGROUND_GRAY, SplitPane } from "@cloudflare/workers-editor-shared";
+import React, { createContext, useEffect, useState } from "react";
+import defaultHashes from "./defaultHashes";
 import EditorPane from "./EditorPane";
-import SplitPane from "./SplitPane";
 import ToolsPane from "./ToolsPane";
 import { TopBar } from "./TopBar";
-import { BACKGROUND_GRAY } from "./constants";
-import { observeDarkMode, theme } from "@cloudflare/style-const";
-import { createComponent } from "@cloudflare/style-container";
-import defaultHash from "./defaultHash";
+import { useDraftWorker } from "./useDraftWorker";
 
 type DraftWorkerWithPreviewUrl = ReturnType<typeof useDraftWorker> & {
 	previewUrl: string;
@@ -36,7 +38,6 @@ function FullScreenLayout({ children }: { children: React.ReactNode }) {
 		</Div>
 	);
 }
-import { isDarkMode } from "@cloudflare/style-const";
 
 const BrandDiv = createComponent(({ theme }) => ({
 	height: theme.space[1],
@@ -55,18 +56,28 @@ export default function QuickEditor() {
 		window.location.hash.slice(1)
 	);
 
-	function updateWorkerHash(hash: string) {
-		history.replaceState(null, "", hash);
-	}
+	const draftWorker = useDraftWorker(initialWorkerContentHash);
 
-	const draftWorker = useDraftWorker(
-		initialWorkerContentHash,
-		updateWorkerHash
-	);
+	useEffect(() => {
+		function updateWorkerHash(hash: string) {
+			history.replaceState(null, "", hash);
+		}
+
+		const hash = draftWorker.previewHash?.serialised;
+
+		if (hash) {
+			updateWorkerHash(`/playground#${hash}`);
+		}
+	}, [draftWorker.previewHash?.serialised]);
 
 	useEffect(() => {
 		if (initialWorkerContentHash === "") {
-			setInitialHash(defaultHash);
+			const suffix = location.pathname.slice("/playground".length);
+			setInitialHash(
+				suffix in defaultHashes
+					? defaultHashes[suffix as keyof typeof defaultHashes]
+					: defaultHashes["/"]
+			);
 		}
 	}, [initialWorkerContentHash]);
 
@@ -89,7 +100,7 @@ export default function QuickEditor() {
 						minSize={50}
 						maxSize={-50}
 						style={{ backgroundColor: BACKGROUND_GRAY }}
-						paneStyle={{ backgroundColor: theme.colors.background }}
+						paneStyle={{ backgroundColor: styleTheme.colors.background }}
 					>
 						<EditorPane />
 						<ToolsPane />

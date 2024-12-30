@@ -16,11 +16,11 @@ export function getLocalPersistencePath(
 ) {
 	return persistTo
 		? // If path specified, always treat it as relative to cwd()
-		  path.resolve(process.cwd(), persistTo)
-		: // Otherwise, treat it as relative to wrangler.toml,
-		  // if one can be found, otherwise cwd()
-		  path.resolve(
+			path.resolve(process.cwd(), persistTo)
+		: // Otherwise, treat it as relative to the Wrangler configuration file,
+			// if one can be found, otherwise cwd()
+			path.resolve(
 				configPath ? path.dirname(configPath) : process.cwd(),
 				".wrangler/state"
-		  );
+			);
 }

@@ -1,4 +1,4 @@
-import { rest } from "msw";
+import { http, HttpResponse } from "msw";
 import { endEventLoop } from "../helpers/end-event-loop";
 import { mockAccountId, mockApiToken } from "./../helpers/mock-account-id";
 import { mockConsoleMethods } from "./../helpers/mock-console";
@@ -6,7 +6,7 @@ import { msw } from "./../helpers/msw";
 import { runInTempDir } from "./../helpers/run-in-tmp";
 import { runWrangler } from "./../helpers/run-wrangler";
 
-describe("project create", () => {
+describe("pages project create", () => {
 	const std = mockConsoleMethods();
 
 	runInTempDir();
@@ -23,12 +23,12 @@ describe("project create", () => {
 
 	it("should create a project with a production branch", async () => {
 		msw.use(
-			rest.post(
+			http.post(
 				"*/accounts/:accountId/pages/projects",
-				async (req, res, ctx) => {
-					const body = await req.json();
+				async ({ request, params }) => {
+					const body = (await request.json()) as Record<string, unknown>;
 
-					expect(req.params.accountId).toEqual("some-account-id");
+					expect(params.accountId).toEqual("some-account-id");
 					expect(body).toEqual({
 						name: "a-new-project",
 						production_branch: "main",
@@ -38,9 +38,8 @@ describe("project create", () => {
 						},
 					});
 
-					return res.once(
-						ctx.status(200),
-						ctx.json({
+					return HttpResponse.json(
+						{
 							success: true,
 							errors: [],
 							messages: [],
@@ -48,9 +47,11 @@ describe("project create", () => {
 								...body,
 								subdomain: "a-new-project.pages.dev",
 							},
-						})
+						},
+						{ status: 200 }
 					);
-				}
+				},
+				{ once: true }
 			)
 		);
 
@@ -66,10 +67,10 @@ describe("project create", () => {
 
 	it("should create a project with compatibility flags", async () => {
 		msw.use(
-			rest.post(
+			http.post(
 				"*/accounts/:accountId/pages/projects",
-				async (req, res, ctx) => {
-					const body = await req.json();
+				async ({ request }) => {
+					const body = (await request.json()) as Record<string, unknown>;
 					expect(body).toEqual({
 						name: "a-new-project",
 						production_branch: "main",
@@ -79,9 +80,8 @@ describe("project create", () => {
 						},
 					});
 
-					return res.once(
-						ctx.status(200),
-						ctx.json({
+					return HttpResponse.json(
+						{
 							success: true,
 							errors: [],
 							messages: [],
@@ -89,9 +89,11 @@ describe("project create", () => {
 								...body,
 								subdomain: "a-new-project.pages.dev",
 							},
-						})
+						},
+						{ status: 200 }
 					);
-				}
+				},
+				{ once: true }
 			)
 		);
 
@@ -107,10 +109,10 @@ describe("project create", () => {
 
 	it("should create a project with a compatibility date", async () => {
 		msw.use(
-			rest.post(
+			http.post(
 				"*/accounts/:accountId/pages/projects",
-				async (req, res, ctx) => {
-					const body = await req.json();
+				async ({ request }) => {
+					const body = (await request.json()) as Record<string, unknown>;
 					expect(body).toEqual({
 						name: "a-new-project",
 						production_branch: "main",
@@ -120,9 +122,8 @@ describe("project create", () => {
 						},
 					});
 
-					return res.once(
-						ctx.status(200),
-						ctx.json({
+					return HttpResponse.json(
+						{
 							success: true,
 							errors: [],
 							messages: [],
@@ -130,9 +131,11 @@ describe("project create", () => {
 								...body,
 								subdomain: "a-new-project.pages.dev",
 							},
-						})
+						},
+						{ status: 200 }
 					);
-				}
+				},
+				{ once: true }
 			)
 		);
 
@@ -144,5 +147,40 @@ describe("project create", () => {
             "✨ Successfully created the 'a-new-project' project. It will be available at https://a-new-project.pages.dev/ once you create your first deployment.
             To deploy a folder of assets, run 'wrangler pages deploy [directory]'."
         `);
+	});
+
+	it("should override cached accountId with CLOUDFLARE_ACCOUNT_ID environmental variable if provided", async () => {
+		msw.use(
+			http.post(
+				"*/accounts/:accountId/pages/projects",
+				async ({ request, params }) => {
+					const body = (await request.json()) as Record<string, unknown>;
+					expect(params.accountId).toEqual("new-account-id");
+					return HttpResponse.json(
+						{
+							success: true,
+							errors: [],
+							messages: [],
+							result: {
+								...body,
+								subdomain: "an-existing-project.pages.dev",
+							},
+						},
+						{ status: 200 }
+					);
+				},
+				{ once: true }
+			)
+		);
+		vi.mock("getConfigCache", () => {
+			return {
+				account_id: "original-account-id",
+				project_name: "an-existing-project",
+			};
+		});
+		vi.stubEnv("CLOUDFLARE_ACCOUNT_ID", "new-account-id");
+		await runWrangler(
+			"pages project create an-existing-project --production-branch=main --compatibility-date 2022-03-08"
+		);
 	});
 });

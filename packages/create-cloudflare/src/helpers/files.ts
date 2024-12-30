@@ -1,13 +1,30 @@
-import fs, { existsSync } from "fs";
-import { crash } from "@cloudflare/cli";
-import { getWorkerdCompatibilityDate } from "./command";
-import type { PagesGeneratorContext } from "types";
+import fs, { existsSync, statSync } from "fs";
+import { join } from "path";
+import TOML from "@iarna/toml";
+import type { JsonMap } from "@iarna/toml";
+import type { C3Context } from "types";
+
+export const copyFile = (path: string, dest: string) => {
+	try {
+		fs.copyFileSync(path, dest);
+	} catch (error) {
+		throw new Error(error as string);
+	}
+};
 
 export const writeFile = (path: string, content: string) => {
 	try {
 		fs.writeFileSync(path, content);
 	} catch (error) {
-		crash(error as string);
+		throw new Error(error as string);
+	}
+};
+
+export const appendFile = (path: string, content: string) => {
+	try {
+		fs.appendFileSync(path, content);
+	} catch (error) {
+		throw new Error(error as string);
 	}
 };
 
@@ -15,7 +32,27 @@ export const readFile = (path: string) => {
 	try {
 		return fs.readFileSync(path, "utf-8");
 	} catch (error) {
-		return crash(error as string);
+		throw new Error(error as string);
+	}
+};
+
+export const removeFile = (path: string) => {
+	try {
+		fs.rmSync(path, { force: true });
+	} catch (error) {
+		throw new Error(`Remove file failed: ${path}`, { cause: error });
+	}
+};
+
+export const directoryExists = (path: string): boolean => {
+	try {
+		const stat = statSync(path);
+		return stat.isDirectory();
+	} catch (error) {
+		if ((error as { code: string }).code === "ENOENT") {
+			return false;
+		}
+		throw new Error(error as string);
 	}
 };
 
@@ -24,37 +61,41 @@ export const readJSON = (path: string) => {
 	return contents ? JSON.parse(contents) : contents;
 };
 
-export const writeJSON = (
-	path: string,
-	object: object,
-	stringifySpace?: number | string
-) => {
+export const readToml = (path: string) => {
+	const contents = readFile(path);
+	return contents ? TOML.parse(contents) : {};
+};
+
+export const writeJSON = (path: string, object: object, stringifySpace = 2) => {
 	writeFile(path, JSON.stringify(object, null, stringifySpace));
 };
 
-// Probes a list of paths and returns the first one that exists
-// If one isn't found, throws an error with the given message
-export const probePaths = (
-	paths: string[],
-	errorMsg = "Failed to find required file."
-) => {
+export const writeToml = (path: string, object: JsonMap) => {
+	writeFile(path, TOML.stringify(object));
+};
+
+// Probes a list of paths and returns the first one that exists or null if none does
+export const probePaths = (paths: string[]) => {
 	for (const path of paths) {
 		if (existsSync(path)) {
 			return path;
 		}
 	}
 
-	crash(errorMsg);
-	process.exit(1); // hack to make typescript happy
+	return null;
 };
 
-export const usesTypescript = (projectRoot = ".") => {
-	return existsSync(`${projectRoot}/tsconfig.json`);
+export const usesTypescript = (ctx: C3Context) => {
+	return hasTsConfig(ctx.project.path);
+};
+
+export const hasTsConfig = (path: string) => {
+	return existsSync(join(`${path}`, `tsconfig.json`));
 };
 
 const eslintRcExts = ["js", "cjs", "yaml", "yml", "json"] as const;
 
-type EslintRcFileName = `.eslintrc.${typeof eslintRcExts[number]}`;
+type EslintRcFileName = `.eslintrc.${(typeof eslintRcExts)[number]}`;
 
 type EslintUsageInfo =
 	| {
@@ -71,7 +112,7 @@ type EslintUsageInfo =
 		- https://eslint.org/docs/latest/use/configure/configuration-files#configuration-file-formats
 		- https://eslint.org/docs/latest/use/configure/configuration-files-new )
 */
-export const usesEslint = (ctx: PagesGeneratorContext): EslintUsageInfo => {
+export const usesEslint = (ctx: C3Context): EslintUsageInfo => {
 	for (const ext of eslintRcExts) {
 		const eslintRcFilename = `.eslintrc.${ext}` as EslintRcFileName;
 		if (existsSync(`${ctx.project.path}/${eslintRcFilename}`)) {
@@ -100,10 +141,4 @@ export const usesEslint = (ctx: PagesGeneratorContext): EslintUsageInfo => {
 	} catch {}
 
 	return { used: false };
-};
-
-// Generate a compatibility date flag
-export const compatDateFlag = async () => {
-	const workerdCompatDate = await getWorkerdCompatibilityDate();
-	return `--compatibility-date=${workerdCompatDate}`;
 };

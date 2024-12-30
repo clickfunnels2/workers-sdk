@@ -5,10 +5,12 @@
  * only recieve the ones we care about.
  */
 
+import { UserError } from "../errors";
+
 /**
  * These are the filters we accept in the CLI. They
  * were copied directly from Wrangler v1 in order to
- * maintain compatability, so they aren't actually the exact
+ * maintain compatibility, so they aren't actually the exact
  * filters we need to send up to the tail worker. They generally map 1:1,
  * but often require some transformation or
  * renaming to match what it expects.
@@ -23,6 +25,7 @@ export type TailCLIFilters = {
 	search?: string;
 	samplingRate?: number;
 	clientIp?: string[];
+	versionId?: string;
 };
 
 /**
@@ -38,7 +41,8 @@ export type TailAPIFilter =
 	| MethodFilter
 	| HeaderFilter
 	| ClientIPFilter
-	| QueryFilter;
+	| QueryFilter
+	| ScriptVersionFilter;
 
 /**
  * Filters logs based on a given sampling rate.
@@ -117,6 +121,14 @@ type QueryFilter = {
 };
 
 /**
+ * Filters logs by a version id. All logs must originate from a
+ * worker with a matching version id.
+ */
+type ScriptVersionFilter = {
+	scriptVersion: string;
+};
+
+/**
  * The full message we send to the tail worker includes our
  * filters and a debug flag.
  */
@@ -160,6 +172,10 @@ export function translateCLICommandToFilterMessage(
 		apiFilters.push(parseQuery(cliFilters.search));
 	}
 
+	if (cliFilters.versionId) {
+		apiFilters.push(parseScriptVersion(cliFilters.versionId));
+	}
+
 	return {
 		filters: apiFilters,
 	};
@@ -174,7 +190,7 @@ export function translateCLICommandToFilterMessage(
  */
 function parseSamplingRate(sampling_rate: number): SamplingRateFilter {
 	if (sampling_rate <= 0 || sampling_rate >= 1) {
-		throw new Error(
+		throw new UserError(
 			"A sampling rate must be between 0 and 1 in order to have any effect.\nFor example, a sampling rate of 0.25 means 25% of events will be logged."
 		);
 	}
@@ -274,4 +290,16 @@ function parseIP(client_ip: string[]): ClientIPFilter {
  */
 function parseQuery(query: string): QueryFilter {
 	return { query };
+}
+
+/**
+ * Users can filter for logs that were emitted from a Worker with a
+ * specific version. This is especially useful when debugging an issue
+ * that only happens in one branch of a gradual rollout.
+ *
+ * @param scriptVersion the id of the version that a log must match.
+ * @returns a ScriptVersionFilter for use with the API
+ */
+function parseScriptVersion(scriptVersion: string): ScriptVersionFilter {
+	return { scriptVersion };
 }

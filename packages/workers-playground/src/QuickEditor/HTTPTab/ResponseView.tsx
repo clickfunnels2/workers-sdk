@@ -1,6 +1,8 @@
-import React, { useMemo, useState, useEffect } from "react";
-import { Div } from "@cloudflare/elements";
 import CodeBlock from "@cloudflare/component-code-block";
+import { Div } from "@cloudflare/elements";
+import { useEffect, useMemo, useState } from "react";
+import type React from "react";
+
 type Props = {
 	response: Response;
 	loading: boolean;
@@ -40,11 +42,8 @@ function maybeGetLanguage(
 }
 
 const ResponseView: React.FC<Props> = ({ response, loading }) => {
-	const { status, statusCode } = useMemo(() => {
-		const status = response.headers.get("cf-ew-status") || "";
-		const statusCode = window.parseInt(status, 10);
-		return { status, statusCode };
-	}, [response]);
+	const status = response.headers.get("cf-ew-status") ?? "200";
+	const statusCode = window.parseInt(status, 10);
 
 	const headers = useMemo(
 		() =>

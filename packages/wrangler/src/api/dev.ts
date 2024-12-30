@@ -1,16 +1,17 @@
+import events from "node:events";
 import { fetch, Request } from "undici";
-import { startApiDev, startDev } from "../dev";
+import { startDev } from "../dev";
+import { run } from "../experimental-flags";
 import { logger } from "../logger";
-
 import type { Environment } from "../config";
 import type { Rule } from "../config/environment";
 import type { CfModule } from "../deployment-bundle/worker";
 import type { StartDevOptions } from "../dev";
 import type { EnablePagesAssetsServiceBindingOptions } from "../miniflare-cli/types";
 import type { Json } from "miniflare";
-import type { RequestInit, Response, RequestInfo } from "undici";
+import type { RequestInfo, RequestInit, Response } from "undici";
 
-export interface UnstableDevOptions {
+export interface Unstable_DevOptions {
 	config?: string; // Path to .toml configuration file, relative to cwd
 	cache?: boolean; // Enable/disable caching
 	env?: string; // Environment to use for operations and .env files
@@ -19,7 +20,10 @@ export interface UnstableDevOptions {
 	bundle?: boolean; // Set to false to skip internal build steps and directly deploy script
 	inspectorPort?: number; // Port for devtools to connect to
 	localProtocol?: "http" | "https"; // Protocol to listen to requests on, defaults to http.
+	httpsKeyPath?: string;
+	httpsCertPath?: string;
 	assets?: string; // Static assets to be served
+	legacyAssets?: string; // Static assets to be served
 	site?: string; // Root folder of static assets for Workers Sites
 	siteInclude?: string[]; // Array of .gitignore-style patterns that match file or directory names from the sites directory. Only matched items will be uploaded.
 	siteExclude?: string[]; // Array of .gitignore-style patterns that match file or directory names from the sites directory. Matched items will not be uploaded.
@@ -31,7 +35,7 @@ export interface UnstableDevOptions {
 	vars?: Record<string, string | Json>;
 	kv?: {
 		binding: string;
-		id: string;
+		id?: string;
 		preview_id?: string;
 	}[];
 	durableObjects?: {
@@ -44,19 +48,25 @@ export interface UnstableDevOptions {
 		binding: string;
 		service: string;
 		environment?: string | undefined;
+		entrypoint?: string | undefined;
 	}[];
 	r2?: {
 		binding: string;
-		bucket_name: string;
+		bucket_name?: string;
 		preview_bucket_name?: string;
 	}[];
+	ai?: {
+		binding: string;
+	};
+	version_metadata?: {
+		binding: string;
+	};
 	moduleRoot?: string;
 	rules?: Rule[];
 	logLevel?: "none" | "info" | "error" | "log" | "warn" | "debug"; // Specify logging level  [choices: "debug", "info", "log", "warn", "error", "none"] [default: "log"]
 	inspect?: boolean;
 	local?: boolean;
 	accountId?: string;
-	updateCheck?: boolean;
 	experimental?: {
 		processEntrypoint?: boolean;
 		additionalModules?: CfModule[];
@@ -70,10 +80,14 @@ export interface UnstableDevOptions {
 		testMode?: boolean; // This option shouldn't be used - We plan on removing it eventually
 		testScheduled?: boolean; // Test scheduled events by visiting /__scheduled in browser
 		watch?: boolean; // unstable_dev doesn't support watch-mode yet in testMode
+		devEnv?: boolean;
+		fileBasedRegistry?: boolean;
+		vectorizeBindToProd?: boolean;
+		enableIpc?: boolean;
 	};
 }
 
-export interface UnstableDevWorker {
+export interface Unstable_DevWorker {
 	port: number;
 	address: string;
 	stop: () => Promise<void>;
@@ -85,9 +99,9 @@ export interface UnstableDevWorker {
  */
 export async function unstable_dev(
 	script: string,
-	options?: UnstableDevOptions,
+	options?: Unstable_DevOptions,
 	apiOptions?: unknown
-): Promise<UnstableDevWorker> {
+): Promise<Unstable_DevWorker> {
 	// Note that not every experimental option is passed directly through to the underlying dev API - experimental options can be used here in unstable_dev. Otherwise we could just pass experimental down to dev blindly.
 
 	const experimentalOptions = {
@@ -112,6 +126,8 @@ export async function unstable_dev(
 		showInteractiveDevSession,
 		testMode,
 		testScheduled,
+		fileBasedRegistry = true,
+		vectorizeBindToProd,
 		// 2. options for alpha/beta products/libs
 		d1Databases,
 		enablePagesAssetsServiceBinding,
@@ -129,13 +145,16 @@ export async function unstable_dev(
 		);
 	}
 
-	type ReadyInformation = { address: string; port: number };
+	type ReadyInformation = {
+		address: string;
+		port: number;
+	};
 	let readyResolve: (info: ReadyInformation) => void;
 	const readyPromise = new Promise<ReadyInformation>((resolve) => {
 		readyResolve = resolve;
 	});
 
-	const defaultLogLevel = testMode ? "none" : "log";
+	const defaultLogLevel = testMode ? "warn" : "log";
 	const local = options?.local ?? true;
 
 	const devOptions: StartDevOptions = {
@@ -144,7 +163,7 @@ export async function unstable_dev(
 		_: [],
 		$0: "",
 		remote: !local,
-		local,
+		local: undefined,
 		experimentalLocal: undefined,
 		d1Databases,
 		disableDevRegistry,
@@ -163,18 +182,20 @@ export async function unstable_dev(
 		bundle: options?.bundle,
 		compatibilityDate: options?.compatibilityDate,
 		compatibilityFlags: options?.compatibilityFlags,
-		ip: options?.ip,
-		inspectorPort: options?.inspectorPort,
+		ip: "127.0.0.1",
+		inspectorPort: options?.inspectorPort ?? 0,
 		v: undefined,
 		localProtocol: options?.localProtocol,
-		assets: options?.assets,
+		httpsKeyPath: options?.httpsKeyPath,
+		httpsCertPath: options?.httpsCertPath,
+		assets: undefined,
+		legacyAssets: options?.legacyAssets,
 		site: options?.site, // Root folder of static assets for Workers Sites
 		siteInclude: options?.siteInclude, // Array of .gitignore-style patterns that match file or directory names from the sites directory. Only matched items will be uploaded.
 		siteExclude: options?.siteExclude, // Array of .gitignore-style patterns that match file or directory names from the sites directory. Matched items will not be uploaded.
 		nodeCompat: options?.nodeCompat, // Enable Node.js compatibility
 		persist: options?.persist, // Enable persistence for local mode, using default path: .wrangler/state
 		persistTo: options?.persistTo, // Specify directory to use for local persistence (implies --persist)
-		experimentalJsonConfig: undefined,
 		name: undefined,
 		cache: options?.cache,
 		noBundle: false,
@@ -187,6 +208,7 @@ export async function unstable_dev(
 		upstreamProtocol: undefined,
 		var: undefined,
 		define: undefined,
+		alias: undefined,
 		jsxFactory: undefined,
 		jsxFragment: undefined,
 		tsconfig: undefined,
@@ -197,57 +219,45 @@ export async function unstable_dev(
 		...options,
 		logLevel: options?.logLevel ?? defaultLogLevel,
 		port: options?.port ?? 0,
-		updateCheck: options?.updateCheck ?? false,
+		experimentalProvision: undefined,
+		experimentalVersions: undefined,
+		experimentalDevEnv: undefined,
+		experimentalRegistry: fileBasedRegistry,
+		experimentalVectorizeBindToProd: vectorizeBindToProd ?? false,
+		enableIpc: options?.experimental?.enableIpc,
 	};
 
-	//due to Pages adoption of unstable_dev, we can't *just* disable rebuilds and watching. instead, we'll have two versions of startDev, which will converge.
-	if (testMode) {
-		// in testMode, we can run multiple wranglers in parallel, but rebuilds might not work out of the box
-		// once the devServer is ready for requests, we resolve the ready promise
-		const devServer = await startApiDev(devOptions);
-		const { port, address } = await readyPromise;
-		return {
-			port,
-			address,
-			stop: devServer.stop,
-			fetch: async (input?: RequestInfo, init?: RequestInit) => {
-				return await fetch(
-					...parseRequestInput(
-						address,
-						port,
-						input,
-						init,
-						options?.localProtocol
-					)
-				);
-			},
-			//no-op, does nothing in tests
-			waitUntilExit: async () => {
-				return;
-			},
-		};
-	} else {
-		//outside of test mode, rebuilds work fine, but only one instance of wrangler will work at a time
-		const devServer = await startDev(devOptions);
-		const { port, address } = await readyPromise;
-		return {
-			port,
-			address,
-			stop: devServer.stop,
-			fetch: async (input?: RequestInfo, init?: RequestInit) => {
-				return await fetch(
-					...parseRequestInput(
-						address,
-						port,
-						input,
-						init,
-						options?.localProtocol
-					)
-				);
-			},
-			waitUntilExit: devServer.devReactElement.waitUntilExit,
-		};
-	}
+	//outside of test mode, rebuilds work fine, but only one instance of wrangler will work at a time
+	const devServer = await run(
+		{
+			FILE_BASED_REGISTRY: fileBasedRegistry,
+			// TODO: can we make this work?
+			MULTIWORKER: false,
+			RESOURCES_PROVISION: false,
+		},
+		() => startDev(devOptions)
+	);
+	const { port, address } = await readyPromise;
+
+	return {
+		port,
+		address,
+		stop: async () => {
+			await devServer.devEnv.teardown.bind(devServer.devEnv)();
+			const teardownRegistry = await devServer.teardownRegistryPromise;
+			await teardownRegistry?.(devServer.devEnv.config.latestConfig?.name);
+
+			devServer.unregisterHotKeys?.();
+		},
+		fetch: async (input?: RequestInfo, init?: RequestInit) => {
+			return await fetch(
+				...parseRequestInput(address, port, input, init, options?.localProtocol)
+			);
+		},
+		waitUntilExit: async () => {
+			await events.once(devServer.devEnv, "teardown");
+		},
+	};
 }
 
 export function parseRequestInput(
@@ -258,7 +268,9 @@ export function parseRequestInput(
 	protocol: "http" | "https" = "http"
 ): [RequestInfo, RequestInit] {
 	// Make sure URL is absolute
-	if (typeof input === "string") input = new URL(input, "http://placeholder");
+	if (typeof input === "string") {
+		input = new URL(input, "http://placeholder");
+	}
 	// Adapted from Miniflare 3's `dispatchFetch()` function
 	const forward = new Request(input, init);
 	const url = new URL(forward.url);

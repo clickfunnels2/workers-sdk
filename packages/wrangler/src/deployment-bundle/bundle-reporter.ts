@@ -36,16 +36,10 @@ export async function printBundleSize(
 		percentage > 90
 			? chalk.red(bundleReport)
 			: percentage > 70
-			? chalk.yellow(bundleReport)
-			: chalk.green(bundleReport);
+				? chalk.yellow(bundleReport)
+				: chalk.green(bundleReport);
 
 	logger.log(`Total Upload: ${colorizedReport}`);
-
-	if (gzipSize > ALLOWED_INITIAL_MAX && !process.env.NO_SCRIPT_SIZE_WARNING) {
-		logger.warn(
-			"We recommend keeping your script less than 1MiB (1024 KiB) after gzip. Exceeding this can affect cold start time. Consider using Wrangler's `--minify` option to reduce your bundle size."
-		);
-	}
 }
 
 export function printOffendingDependencies(

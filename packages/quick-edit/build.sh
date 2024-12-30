@@ -1,7 +1,13 @@
 set -eu
 
+# The preinstall script in vscode will fail if npm_execpath is not set by yarn
+# This make sure the env is unset so yarn can set it accordingly
+unset npm_execpath
+# We cannot run yarn without disabling the corepack check as the packageManager field is set to pnpm
+SKIP_YARN_COREPACK_CHECK=0
+
 # Cleanup development symlink to vscode
-rm -f web/vscode
+rm -f web/assets
 
 yarn --cwd ../../vendor/vscode
 

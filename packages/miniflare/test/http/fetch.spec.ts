@@ -7,9 +7,9 @@ import test from "ava";
 import {
 	CloseEvent,
 	DeferredPromise,
+	fetch,
 	FormData,
 	MessageEvent,
-	fetch,
 } from "miniflare";
 import { WebSocketServer } from "ws";
 import { flaky, useServer } from "../test-shared";
@@ -45,7 +45,7 @@ test("fetch: performs http request with form data", async (t) => {
 test("fetch: performs web socket upgrade", async (t) => {
 	const server = await useServer(t, noop, (ws, req) => {
 		ws.send("hello client");
-		ws.send(req.headers["user-agent"]);
+		ws.send(req.headers["user-agent"] ?? "");
 		ws.addEventListener("message", ({ data }) => ws.send(data));
 	});
 	const res = await fetch(server.http, {
@@ -69,7 +69,7 @@ test("fetch: performs web socket upgrade", async (t) => {
 });
 test("fetch: performs web socket upgrade with Sec-WebSocket-Protocol header", async (t) => {
 	const server = await useServer(t, noop, (ws, req) => {
-		ws.send(req.headers["sec-websocket-protocol"]);
+		ws.send(req.headers["sec-websocket-protocol"] ?? "");
 	});
 	const res = await fetch(server.http, {
 		headers: {
@@ -231,11 +231,13 @@ test("fetch: requires GET for web socket upgrade", async (t) => {
 		}
 	);
 });
-test("fetch: throws catchable error on failure", async (t) => {
+test("fetch: returns regular response if no WebSocket response returned", async (t) => {
 	const server = await useServer(t, (req, res) => {
-		res.end("http response");
+		res.writeHead(404, "Not Found", { "Content-Type": "text/html" });
+		res.end("<p>Not Found</p>");
 	});
-	await t.throwsAsync(
-		fetch(server.http, { headers: { upgrade: "websocket" } })
-	);
+	const res = await fetch(server.http, { headers: { upgrade: "websocket" } });
+	t.is(res.status, 404);
+	t.is(res.headers.get("Content-Type"), "text/html");
+	t.is(await res.text(), "<p>Not Found</p>");
 });

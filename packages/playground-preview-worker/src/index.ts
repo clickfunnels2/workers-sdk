@@ -1,9 +1,33 @@
 import { Hono } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
-import { Toucan } from "toucan-js";
-import { ZodIssue } from "zod";
+import prom from "promjs";
+import {
+	HttpError,
+	PreviewRequestFailed,
+	PreviewRequestForbidden,
+	RawHttpFailed,
+	TokenUpdateFailed,
+	UploadFailed,
+} from "./errors";
 import { handleException, setupSentry } from "./sentry";
-const app = new Hono<{ Bindings: Env; Variables: { sentry: Toucan } }>({
+import type { RegistryType } from "promjs";
+import type { Toucan } from "toucan-js";
+
+function maybeParseUrl(url: string | undefined) {
+	if (!url) {
+		return undefined;
+	}
+	try {
+		return new URL(url);
+	} catch {
+		return undefined;
+	}
+}
+
+const app = new Hono<{
+	Bindings: Env;
+	Variables: { sentry: Toucan; prometheus: RegistryType };
+}>({
 	// This replaces . with / in url hostnames, which allows for parameter matching in hostnames as well as paths
 	// e.g. https://something.example.com/hello/world -> something/example/com/hello/world
 	getPath: (req) => {
@@ -14,111 +38,6 @@ const app = new Hono<{ Bindings: Env; Variables: { sentry: Toucan } }>({
 
 const rootDomain = ROOT;
 const previewDomain = PREVIEW;
-export class HttpError extends Error {
-	constructor(
-		message: string,
-		readonly status: number,
-		// Only report errors to sentry when they represent actionable errors
-		readonly reportable: boolean
-	) {
-		super(message);
-		Object.setPrototypeOf(this, new.target.prototype);
-	}
-	toResponse() {
-		return Response.json(
-			{
-				error: this.name,
-				message: this.message,
-				data: this.data,
-			},
-			{
-				status: this.status,
-				headers: {
-					"Access-Control-Allow-Origin": "*",
-					"Access-Control-Allow-Method": "GET,PUT,POST",
-				},
-			}
-		);
-	}
-
-	get data(): Record<string, unknown> {
-		return {};
-	}
-}
-
-export class WorkerTimeout extends HttpError {
-	name = "WorkerTimeout";
-	constructor() {
-		super("Worker timed out", 400, false);
-	}
-
-	toResponse(): Response {
-		return new Response("Worker timed out");
-	}
-}
-
-export class ServiceWorkerNotSupported extends HttpError {
-	name = "ServiceWorkerNotSupported";
-	constructor() {
-		super(
-			"Service Workers are not supported in the Workers Playground",
-			400,
-			false
-		);
-	}
-}
-export class ZodSchemaError extends HttpError {
-	name = "ZodSchemaError";
-	constructor(private issues: ZodIssue[]) {
-		super("Something went wrong", 500, true);
-	}
-
-	get data(): { issues: string } {
-		return { issues: JSON.stringify(this.issues) };
-	}
-}
-
-export class PreviewError extends HttpError {
-	name = "PreviewError";
-	constructor(private error: string) {
-		super(error, 400, false);
-	}
-
-	get data(): { error: string } {
-		return { error: this.error };
-	}
-}
-
-class TokenUpdateFailed extends HttpError {
-	name = "TokenUpdateFailed";
-	constructor() {
-		super("Provide token", 400, false);
-	}
-}
-
-class RawHttpFailed extends HttpError {
-	name = "RawHttpFailed";
-	constructor() {
-		super("Provide token", 400, false);
-	}
-}
-
-class PreviewRequestFailed extends HttpError {
-	name = "PreviewRequestFailed";
-	constructor(private tokenId: string | undefined, reportable: boolean) {
-		super("Token not found", 400, reportable);
-	}
-	get data(): { tokenId: string | undefined } {
-		return { tokenId: this.tokenId };
-	}
-}
-
-class UploadFailed extends HttpError {
-	name = "UploadFailed";
-	constructor() {
-		super("Token not provided", 401, false);
-	}
-}
 
 /**
  * Given a preview token, this endpoint allows for raw http calls to be inspected
@@ -131,8 +50,13 @@ async function handleRawHttp(request: Request, url: URL, env: Env) {
 	if (!token) {
 		throw new RawHttpFailed();
 	}
-
-	const userObject = env.UserSession.get(env.UserSession.idFromString(token));
+	let userObjectId: DurableObjectId;
+	try {
+		userObjectId = env.UserSession.idFromString(token);
+	} catch {
+		throw new RawHttpFailed();
+	}
+	const userObject = env.UserSession.get(userObjectId);
 
 	// Delete these consumed headers so as not to bloat the request.
 	// Some tokens can be quite large and may cause nginx to reject the
@@ -140,6 +64,15 @@ async function handleRawHttp(request: Request, url: URL, env: Env) {
 
 	const headers = new Headers(request.headers);
 	headers.delete("X-CF-Token");
+
+	const headerEntries = [...headers.entries()];
+
+	for (const header of headerEntries) {
+		if (header[0].startsWith("cf-ew-raw-")) {
+			headers.set(header[0].split("cf-ew-raw-")[1], header[1]);
+			headers.delete(header[0]);
+		}
+	}
 
 	const workerResponse = await userObject.fetch(
 		url,
@@ -152,31 +85,66 @@ async function handleRawHttp(request: Request, url: URL, env: Env) {
 		})
 	);
 
+	const responseHeaders = new Headers(workerResponse.headers);
+
+	const rawHeaders = new Headers({
+		"Access-Control-Allow-Origin": request.headers.get("Origin") ?? "",
+		"Access-Control-Allow-Methods": "*",
+		"Access-Control-Allow-Credentials": "true",
+		"cf-ew-status": workerResponse.status.toString(),
+		"Access-Control-Expose-Headers": "*",
+		Vary: "Origin",
+	});
+
 	// The client needs the raw headers from the worker
 	// Prefix them with `cf-ew-raw-`, so that response headers from _this_ worker don't interfere
-	const rawHeaders: Record<string, string> = {};
-	for (const header of workerResponse.headers.entries()) {
-		rawHeaders[`cf-ew-raw-${header[0]}`] = header[1];
+	const setCookieHeader = responseHeaders.getSetCookie();
+	for (const cookie of setCookieHeader) {
+		rawHeaders.append("cf-ew-raw-set-cookie", cookie);
 	}
+	responseHeaders.delete("Set-Cookie");
+	for (const header of responseHeaders.entries()) {
+		rawHeaders.set(`cf-ew-raw-${header[0]}`, header[1]);
+	}
+
 	return new Response(workerResponse.body, {
 		...workerResponse,
-		headers: {
-			...rawHeaders,
-			"Access-Control-Allow-Origin": request.headers.get("Origin") ?? "",
-			"Access-Control-Allow-Method": "*",
-			"Access-Control-Allow-Credentials": "true",
-			"cf-ew-status": workerResponse.status.toString(),
-			"Access-Control-Expose-Headers": "*",
-			Vary: "Origin",
-		},
+		headers: rawHeaders,
 	});
 }
+
+app.use("*", async (c, next) => {
+	c.set("prometheus", prom());
+
+	const registry = c.get("prometheus");
+	const requestCounter = registry.create(
+		"counter",
+		"devprod_playground_preview_worker_request_total",
+		"Request counter for DevProd's playground-preview-worker service"
+	);
+	requestCounter.inc();
+
+	try {
+		return await next();
+	} finally {
+		c.executionCtx.waitUntil(
+			fetch("https://workers-logging.cfdata.org/prometheus", {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${c.env.PROMETHEUS_TOKEN}`,
+				},
+				body: registry.metrics(),
+			})
+		);
+	}
+});
+
 app.use("*", async (c, next) => {
 	c.set(
 		"sentry",
 		setupSentry(
 			c.req.raw,
-			c.executionCtx,
+			c.executionCtx as ExecutionContext, // TODO: fix hono's types?
 			c.env.SENTRY_DSN,
 			c.env.SENTRY_ACCESS_CLIENT_ID,
 			c.env.SENTRY_ACCESS_CLIENT_SECRET
@@ -202,22 +170,25 @@ app.get(`${rootDomain}/`, async (c) => {
 	const origin = await fetch(c.req.url, c.req);
 	const mutable = new Response(origin.body, origin);
 	const setCookieHeader = cookified.headers.get("Set-Cookie");
-	if (setCookieHeader !== null)
+	if (setCookieHeader !== null) {
 		mutable.headers.set("Set-Cookie", setCookieHeader);
+	}
 
 	return mutable;
 });
 
 app.post(`${rootDomain}/api/worker`, async (c) => {
-	let userId = getCookie(c, "user");
-
+	const userId = getCookie(c, "user");
 	if (!userId) {
 		throw new UploadFailed();
 	}
-
-	const userObject = c.env.UserSession.get(
-		c.env.UserSession.idFromString(userId)
-	);
+	let userObjectId: DurableObjectId;
+	try {
+		userObjectId = c.env.UserSession.idFromString(userId);
+	} catch {
+		throw new UploadFailed();
+	}
+	const userObject = c.env.UserSession.get(userObjectId);
 
 	return userObject.fetch("https://example.com", {
 		body: c.req.body,
@@ -228,15 +199,17 @@ app.post(`${rootDomain}/api/worker`, async (c) => {
 
 app.get(`${rootDomain}/api/inspector`, async (c) => {
 	const url = new URL(c.req.url);
-	let userId = url.searchParams.get("user");
-
+	const userId = url.searchParams.get("user");
 	if (!userId) {
 		throw new PreviewRequestFailed("", false);
 	}
-
-	const userObject = c.env.UserSession.get(
-		c.env.UserSession.idFromString(userId)
-	);
+	let userObjectId: DurableObjectId;
+	try {
+		userObjectId = c.env.UserSession.idFromString(userId);
+	} catch {
+		throw new PreviewRequestFailed(userId, false);
+	}
+	const userObject = c.env.UserSession.get(userObjectId);
 
 	return userObject.fetch(c.req.raw);
 });
@@ -257,14 +230,36 @@ app.get(`${rootDomain}/api/inspector`, async (c) => {
 app.get(`${previewDomain}/.update-preview-token`, (c) => {
 	const url = new URL(c.req.url);
 	const token = url.searchParams.get("token");
+	const referer = maybeParseUrl(c.req.header("Referer"));
+
+	if (
+		!referer ||
+		c.req.header("Sec-Fetch-Dest") !== "iframe" ||
+		!(
+			referer.hostname === "workers.cloudflare.com" ||
+			referer.hostname === "localhost" ||
+			referer.hostname.endsWith("workers-playground.pages.dev")
+		)
+	) {
+		throw new PreviewRequestForbidden();
+	}
+
 	if (!token) {
 		throw new TokenUpdateFailed();
 	}
+	// Validate `token` is an actual Durable Object ID
+	try {
+		c.env.UserSession.idFromString(token);
+	} catch {
+		throw new TokenUpdateFailed();
+	}
+
 	setCookie(c, "token", token, {
 		secure: true,
 		sameSite: "None",
 		httpOnly: true,
 		domain: url.hostname,
+		partitioned: true,
 	});
 
 	return c.redirect(url.searchParams.get("suffix") ?? "/", 307);
@@ -275,7 +270,7 @@ app.all(`${previewDomain}/*`, async (c) => {
 		return new Response(null, {
 			headers: {
 				"Access-Control-Allow-Origin": c.req.headers.get("Origin") ?? "",
-				"Access-Control-Allow-Method": "*",
+				"Access-Control-Allow-Methods": "*",
 				"Access-Control-Allow-Credentials": "true",
 				"Access-Control-Allow-Headers":
 					c.req.headers.get("Access-Control-Request-Headers") ?? "x-cf-token",
@@ -289,14 +284,16 @@ app.all(`${previewDomain}/*`, async (c) => {
 		return handleRawHttp(c.req.raw, url, c.env);
 	}
 	const token = getCookie(c, "token");
-
 	if (!token) {
 		throw new PreviewRequestFailed(token, false);
 	}
-
-	const userObject = c.env.UserSession.get(
-		c.env.UserSession.idFromString(token)
-	);
+	let userObjectId: DurableObjectId;
+	try {
+		userObjectId = c.env.UserSession.idFromString(token);
+	} catch {
+		throw new PreviewRequestFailed(token, false);
+	}
+	const userObject = c.env.UserSession.get(userObjectId);
 
 	const original = await userObject.fetch(
 		url,
@@ -319,6 +316,18 @@ app.all(`${rootDomain}/*`, (c) => fetch(c.req.raw));
 app.onError((e, c) => {
 	console.log("ONERROR");
 	const sentry = c.get("sentry");
+	const registry = c.get("prometheus");
+
+	// Only include reportable `HttpError`s or any other error in error metrics
+	if (!(e instanceof HttpError) || e.reportable) {
+		const errorCounter = registry.create(
+			"counter",
+			"devprod_playground_preview_worker_error_total",
+			"Error counter for DevProd's playground-preview-worker service"
+		);
+		errorCounter.inc();
+	}
+
 	return handleException(e, sentry);
 });
 

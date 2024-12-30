@@ -4,14 +4,39 @@ import fs from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 import { z } from "zod";
-import { Service, Worker_Binding, Worker_Module } from "../../runtime";
-import { Log, MiniflareCoreError, OptionalZodTypeOf } from "../../shared";
-import { Awaitable, QueueConsumerSchema, sanitisePath } from "../../workers";
+import {
+	Extension,
+	Service,
+	Worker_Binding,
+	Worker_Module,
+} from "../../runtime";
+import {
+	Log,
+	MiniflareCoreError,
+	OptionalZodTypeOf,
+	PathSchema,
+} from "../../shared";
+import {
+	Awaitable,
+	QueueConsumerSchema,
+	QueueProducerSchema,
+	sanitisePath,
+} from "../../workers";
+import { UnsafeUniqueKey } from "./constants";
 
 export const DEFAULT_PERSIST_ROOT = ".mf";
 
-export const PersistenceSchema = z.boolean().or(z.string()).optional();
+export const PersistenceSchema = z
+	// Zod checks union types in order, both `z.string().url()` and `PathSchema`
+	// will result in a `string`, but `PathSchema` gets resolved relative to the
+	// closest `rootPath`.
+	.union([z.boolean(), z.string().url(), PathSchema])
+	.optional();
 export type Persistence = z.infer<typeof PersistenceSchema>;
+
+// Set of "worker" names that are being used as wrapped bindings and shouldn't
+// be added a regular worker services. These workers shouldn't be routable.
+export type WrappedBindingNames = Set<string>;
 
 // Maps **service** names to the Durable Object class names exported by them
 export type DurableObjectClassNames = Map<
@@ -19,11 +44,15 @@ export type DurableObjectClassNames = Map<
 	Map<
 		/* className */ string,
 		{
-			unsafeUniqueKey?: string;
+			enableSql?: boolean;
+			unsafeUniqueKey?: UnsafeUniqueKey;
 			unsafePreventEviction?: boolean;
 		}
 	>
 >;
+
+// Maps queue names to producer worker options.
+export type QueueProducers = Map<string, z.infer<typeof QueueProducerSchema>>;
 
 // Maps queue names to the Worker that wishes to consume it. Note each queue
 // can only be consumed by one Worker, but one Worker may consume multiple
@@ -43,11 +72,20 @@ export interface PluginServicesOptions<
 	additionalModules: Worker_Module[];
 	tmpPath: string;
 	workerNames: string[];
+	loopbackPort: number;
+	unsafeStickyBlobs: boolean;
 
 	// ~~Leaky abstractions~~ "Plugin specific options" :)
+	wrappedBindingNames: WrappedBindingNames;
 	durableObjectClassNames: DurableObjectClassNames;
 	unsafeEphemeralDurableObjects: boolean;
+	queueProducers: QueueProducers;
 	queueConsumers: QueueConsumers;
+}
+
+export interface ServicesExtensions {
+	services: Service[];
+	extensions: Extension[];
 }
 
 export interface PluginBase<
@@ -64,7 +102,11 @@ export interface PluginBase<
 	): Awaitable<Record<string, unknown>>;
 	getServices(
 		options: PluginServicesOptions<Options, SharedOptions>
-	): Awaitable<Service[] | void>;
+	): Awaitable<Service[] | ServicesExtensions | void>;
+	getPersistPath?(
+		sharedOptions: OptionalZodTypeOf<SharedOptions>,
+		tmpPath: string
+	): string;
 }
 
 export type Plugin<
@@ -75,9 +117,12 @@ export type Plugin<
 		? { sharedOptions?: undefined }
 		: { sharedOptions: SharedOptions });
 
-// When this is returned as the binding from `PluginBase#getNodeBindings()`,
-// Miniflare will replace it with a proxy to the binding in `workerd`
-export const kProxyNodeBinding = Symbol("kProxyNodeBinding");
+// When an instance of this class is returned as the binding from `PluginBase#getNodeBindings()`,
+// Miniflare will replace it with a proxy to the binding in `workerd`, alongside applying the
+// specified overrides (if there is any)
+export class ProxyNodeBinding {
+	constructor(public proxyOverrideHandler?: ProxyHandler<any>) {}
+}
 
 export function namespaceKeys(
 	namespaces?: Record<string, string> | string[]

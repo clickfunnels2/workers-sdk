@@ -1,13 +1,16 @@
 import { resolve } from "node:path";
 import { fetch } from "undici";
-import { describe, it, beforeAll, afterAll } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import { runWranglerPagesDev } from "../../shared/src/run-wrangler-long-lived";
 
 describe("Pages Functions", () => {
-	let ip: string, port: number, stop: (() => Promise<unknown>) | undefined;
+	let ip: string,
+		port: number,
+		stop: (() => Promise<unknown>) | undefined,
+		getOutput: () => string;
 
 	beforeAll(async () => {
-		({ ip, port, stop } = await runWranglerPagesDev(
+		({ ip, port, stop, getOutput } = await runWranglerPagesDev(
 			resolve(__dirname, ".."),
 			"public",
 			[
@@ -15,6 +18,7 @@ describe("Pages Functions", () => {
 				"--binding=OTHER_NAME=THING=WITH=EQUALS",
 				"--r2=BUCKET",
 				"--port=0",
+				"--inspector-port=0",
 			]
 		));
 	});
@@ -111,6 +115,13 @@ describe("Pages Functions", () => {
 				`"This should return a 502 status code"`
 			);
 			expect(response.status).toBe(502);
+		});
+
+		it("should work with peer externals", async ({ expect }) => {
+			const response = await fetch(`http://${ip}:${port}/mounted-plugin/ext`);
+			const text = await response.text();
+			expect(text).toMatchInlineSnapshot(`"42 is even"`);
+			expect(response.status).toBe(200);
 		});
 
 		it("should mount a Plugin even if in a parameterized route", async ({

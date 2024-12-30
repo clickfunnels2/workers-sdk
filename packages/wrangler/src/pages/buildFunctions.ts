@@ -12,6 +12,7 @@ import { getPagesTmpDir, RUNNING_BUILDERS } from "./utils";
 import type { BundleResult } from "../deployment-bundle/bundle";
 import type { PagesBuildArgs } from "./build";
 import type { Config } from "./functions/routes";
+import type { NodeJSCompatMode } from "miniflare";
 
 /**
  * Builds a Functions worker based on the functions directory, with filepath and handler based routing.
@@ -31,13 +32,15 @@ export async function buildFunctions({
 	plugin = false,
 	buildOutputDirectory,
 	routesOutputPath,
-	legacyNodeCompat,
-	nodejsCompat,
+	nodejsCompatMode,
 	local,
 	routesModule = join(
 		getPagesTmpDir(),
 		`./functionsRoutes-${Math.random()}.mjs`
 	),
+	defineNavigatorUserAgent,
+	checkFetch,
+	external,
 }: Partial<
 	Pick<
 		PagesBuildArgs,
@@ -50,17 +53,19 @@ export async function buildFunctions({
 		| "watch"
 		| "plugin"
 		| "buildOutputDirectory"
+		| "external"
 	>
 > & {
 	functionsDirectory: string;
 	onEnd?: () => void;
 	routesOutputPath?: PagesBuildArgs["outputRoutesPath"];
 	local: boolean;
-	legacyNodeCompat?: boolean;
-	nodejsCompat?: boolean;
+	nodejsCompatMode?: NodeJSCompatMode;
 	// Allow `routesModule` to be fixed, so we don't create a new file in the
 	// temporary directory each time
 	routesModule?: string;
+	defineNavigatorUserAgent: boolean;
+	checkFetch: boolean;
 }) {
 	RUNNING_BUILDERS.forEach(
 		(runningBuilder) => runningBuilder.stop && runningBuilder.stop()
@@ -114,9 +119,12 @@ export async function buildFunctions({
 			minify,
 			sourcemap,
 			watch,
-			legacyNodeCompat,
+			nodejsCompatMode,
 			functionsDirectory: absoluteFunctionsDirectory,
 			local,
+			defineNavigatorUserAgent,
+			checkFetch,
+			external,
 		});
 	} else {
 		bundle = await buildWorkerFromFunctions({
@@ -131,8 +139,10 @@ export async function buildFunctions({
 			local,
 			onEnd,
 			buildOutputDirectory,
-			legacyNodeCompat,
-			nodejsCompat,
+			nodejsCompatMode,
+			defineNavigatorUserAgent,
+			checkFetch,
+			external,
 		});
 	}
 

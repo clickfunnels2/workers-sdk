@@ -1,15 +1,17 @@
 module.exports = {
 	root: true,
-	extends: ["@cloudflare/eslint-config-worker"],
+	extends: ["@cloudflare/eslint-config-worker/react"],
 	ignorePatterns: [
 		"vendor",
 		"*-dist",
 		"pages/functions/template-worker.ts",
 		"templates",
 		"emitted-types",
+		"kv-asset-handler.js",
 	],
 	overrides: [
 		{
+			// TODO: add linting for `startDevWorker` workers in `templates/startDevWorker`
 			files: "src/**/*.ts",
 			excludedFiles: "*.test.ts",
 			parserOptions: {
